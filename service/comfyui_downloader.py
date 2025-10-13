@@ -8,7 +8,8 @@ import requests
 import aipg_utils
 import service_config
 from web_request_bodies import ComfyUICustomNodesGithubRepoId
-
+import subprocess
+import tempfile
 
 def is_comfyUI_installed() -> bool:
     return os.path.exists(service_config.comfy_ui_root_path)
@@ -51,14 +52,64 @@ def get_git_ref(repo_dir: str) -> Optional[str]:
         return
 
 
+
+
 def _install_pip_requirements(requirements_txt_path: str):
     logging.info(f"installing python requirements from {requirements_txt_path} using {sys.executable}")
-    if os.path.exists(requirements_txt_path):
-        python_exe_callable_path = "'" + os.path.abspath(service_config.comfyui_python_exe) + "'" # this returns the abs path and may contain spaces. Escape the spaces with "ticks"
-        aipg_utils.call_subprocess(f"{python_exe_callable_path} -m pip install -r '{requirements_txt_path}'")
-        logging.info("python requirements installation completed.")
-    else:
+    if not os.path.exists(requirements_txt_path):
         logging.warning(f"specified {requirements_txt_path} does not exist.")
+        return
+
+    # A set is used for efficient lookup
+    EXCLUDED_PACKAGES = {"torch", "torchvision", "torchaudio"}
+
+    # Create a temporary file to hold the filtered requirements
+    temp_requirements_fd, temp_requirements_path = tempfile.mkstemp(suffix=".txt")
+    
+    try:
+        logging.info(f"Checking for packages to exclude: {EXCLUDED_PACKAGES}")
+        
+        with open(requirements_txt_path, 'r', encoding='utf-8') as infile, \
+             open(temp_requirements_fd, 'w', encoding='utf-8') as outfile:
+            
+            for line in infile:
+                # Get the package name by splitting the line at various specifiers
+                package_name = line.strip().split('==')[0].split('>')[0].split('<')[0]
+                
+                # Check if the package is in our excluded list
+                if package_name not in EXCLUDED_PACKAGES:
+                    outfile.write(line)
+                else:
+                    logging.info(f"Excluding '{package_name}' from installation.")
+        
+        # Get the path to the python executable and ensure it can be safely passed to subprocess
+        python_exe_callable_path = os.path.abspath(service_config.comfyui_python_exe)
+
+        # Call the subprocess with a list of arguments for safety
+        command = [
+            python_exe_callable_path,
+            "-m", "uv", "pip", "install",
+            "-r", temp_requirements_path,
+        ]
+        
+        logging.info(f"Executing command: {' '.join(command)}")
+        
+        # Use subprocess.run directly instead of an external aipg_utils.call_subprocess
+        # It is generally better to use standard libraries.
+        subprocess.run(command, check=True)
+        
+        logging.info("Python requirements installation completed.")
+        
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error during uv installation: {e}")
+        # Re-raise the exception or handle it as appropriate for your application
+        raise e
+    except FileNotFoundError:
+        logging.error(f"Error: requirements file not found at {requirements_txt_path}")
+        raise
+    finally:
+        # Clean up the temporary file, ensuring it's removed even if an error occurs
+        os.remove(temp_requirements_path)
 
 
 def install_pypi_package(packageSpecifier: str):
@@ -84,7 +135,7 @@ def install_pypi_package(packageSpecifier: str):
 
     logging.info(f"installing python package {packageSpecifier} using {sys.executable}")
     python_exe_callable_path = "'" + os.path.abspath(service_config.comfyui_python_exe) + "'" # this returns the abs path and may contain spaces. Escape the spaces with "ticks"
-    aipg_utils.call_subprocess(f"{python_exe_callable_path} -m pip install '{pip_specifier}'")
+    aipg_utils.call_subprocess(f"{python_exe_callable_path} -m uv pip install '{pip_specifier}'")
     aipg_utils.remove_existing_filesystem_resource('./dep.whl')
     logging.info("python package installation completed.")
 
