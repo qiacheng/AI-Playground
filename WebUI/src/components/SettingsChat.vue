@@ -105,6 +105,42 @@
             @click="() => (textInference.toolsEnabled = !textInference.toolsEnabled)"
           />
         </div>
+        <div
+          v-if="showTools && textInference.modelSupportsToolCalling"
+          class="grid grid-cols-[120px_1fr] items-start gap-4"
+        >
+          <Label class="whitespace-nowrap pt-2">MCP Servers</Label>
+          <div class="flex flex-col gap-2">
+            <Textarea
+              v-model="mcp.serverConfigsText"
+              class="min-h-[150px] text-sm font-mono"
+              placeholder='[{"name":"filesystem","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."],"enabled":false}]'
+            />
+            <div class="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                class="self-start w-auto px-3 py-1.5 rounded text-sm"
+                @click="refreshMcpTools"
+                :disabled="!!mcp.parseError || mcp.loading"
+              >
+                {{ mcp.loading ? 'Refreshing...' : 'Refresh MCP Tools' }}
+              </Button>
+              <span class="text-xs text-muted-foreground">
+                {{
+                  mcp.discoveredTools.length > 0
+                    ? `${mcp.discoveredTools.length} MCP tools available`
+                    : 'No MCP tools discovered'
+                }}
+              </span>
+            </div>
+            <p v-if="mcp.parseError" class="text-xs text-destructive">
+              {{ mcp.parseError }}
+            </p>
+            <p v-else-if="mcp.lastRefreshError" class="text-xs text-destructive">
+              {{ mcp.lastRefreshError }}
+            </p>
+          </div>
+        </div>
 
         <!-- Embeddings selector - only shown when RAG is enabled -->
         <div v-if="enableRAG" class="grid grid-cols-[120px_1fr] items-center gap-4">
@@ -179,6 +215,7 @@ import { useBackendServices } from '@/assets/js/store/backendServices.ts'
 import DropDownNew from '@/components/DropDownNew.vue'
 import { usePresets, type ChatPreset } from '@/assets/js/store/presets.ts'
 import { usePresetSwitching } from '@/assets/js/store/presetSwitching.ts'
+import { useMcp } from '@/assets/js/store/mcp'
 import PresetSelector from '@/components/PresetSelector.vue'
 import * as toast from '@/assets/js/toast'
 
@@ -191,6 +228,7 @@ const presetsStore = usePresets()
 const presetSwitching = usePresetSwitching()
 const demoMode = useDemoMode()
 const backendServices = useBackendServices()
+const mcp = useMcp()
 
 // Get the active chat preset
 const activeChatPreset = computed(() => {
@@ -274,5 +312,9 @@ const documentStats = computed(() => {
 function isBackendRunning(backend: LlmBackend): boolean {
   const serviceName = backendToService[backend]
   return backendServices.info.find((item) => item.serviceName === serviceName)?.status === 'running'
+}
+
+async function refreshMcpTools() {
+  await mcp.refreshTools()
 }
 </script>

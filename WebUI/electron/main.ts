@@ -56,10 +56,12 @@ import { LLAMACPP_DEFAULT_PARAMETERS } from './subprocesses/llamaCppBackendServi
 import { filterPartnerPresets, updateIntelPresets } from './subprocesses/updateIntelPresets.ts'
 import { getGitHubRepoUrl, resolveBackendVersion, resolveModels } from './remoteUpdates.ts'
 import * as comfyuiTools from './subprocesses/comfyuiTools'
+import { callMcpTool, closeAllMcpSessions, listMcpTools, setMcpEventSink } from './mcp'
 import { externalResourcesDir, getMediaDir } from './util.ts'
-import type { ModelPaths } from '@/assets/js/store/models.ts'
-import type { IndexedDocument, EmbedInquiry } from '@/assets/js/store/textInference.ts'
-import { BackendServiceName } from '@/assets/js/store/backendServices.ts'
+import type { ModelPaths } from '../src/assets/js/store/models.ts'
+import type { IndexedDocument, EmbedInquiry } from '../src/assets/js/store/textInference.ts'
+import { BackendServiceName } from '../src/assets/js/store/backendServices.ts'
+import { normalizeMcpServerConfigs, type McpServerConfig } from '../src/types/mcp'
 import z from 'zod'
 
 // }
@@ -367,6 +369,7 @@ app.on('window-all-closed', async () => {
   try {
     await serviceRegistry?.stopAllServices()
   } catch {}
+  closeAllMcpSessions()
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
@@ -396,6 +399,10 @@ async function initServiceRegistry(win: BrowserWindow, settings: LocalSettings) 
 }
 
 function initEventHandle() {
+  setMcpEventSink((event) => {
+    win?.webContents.send('mcp:event', event)
+  })
+
   screen.on('display-metrics-changed', (_event, display, _changedMetrics) => {
     if (win) {
       win.setBounds({
@@ -637,6 +644,25 @@ function initEventHandle() {
   })
 
   ipcMain.handle('getPlatform', () => process.platform)
+
+  ipcMain.handle('mcp:listTools', async (_event, serverConfigs: McpServerConfig[]) => {
+    const normalizedConfigs = normalizeMcpServerConfigs(serverConfigs)
+    return listMcpTools(normalizedConfigs)
+  })
+
+  ipcMain.handle(
+    'mcp:callTool',
+    async (
+      _event,
+      serverConfig: McpServerConfig,
+      toolName: string,
+      args: unknown,
+      toolCallId?: string,
+    ) => {
+      const normalizedConfig = normalizeMcpServerConfigs([serverConfig])[0]
+      return callMcpTool(normalizedConfig, toolName, args, toolCallId)
+    },
+  )
 
   ipcMain.handle('addDocumentToRAGList', (_event, document: IndexedDocument) => {
     return handleUtilityFunction<IndexedDocument, IndexedDocument>(

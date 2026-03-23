@@ -1,8 +1,9 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import pkg from '../package.json'
 import { LocalSettings } from './main'
-import { ModelPaths } from '@/assets/js/store/models'
-import { EmbedInquiry, IndexedDocument } from '@/assets/js/store/textInference'
+import { ModelPaths } from '../src/assets/js/store/models'
+import { EmbedInquiry, IndexedDocument } from '../src/assets/js/store/textInference'
+import { McpEvent, McpServerConfig } from '../src/types/mcp'
 
 contextBridge.exposeInMainWorld('envVars', {
   platformTitle: import.meta.env.VITE_PLATFORM_TITLE,
@@ -92,6 +93,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDownloadedEmbeddingModels: () => ipcRenderer.invoke('getDownloadedEmbeddingModels'),
   getComfyUIModels: (modelType: string) => ipcRenderer.invoke('getComfyUIModels', modelType),
   getPlatform: () => ipcRenderer.invoke('getPlatform') as Promise<NodeJS.Platform>,
+  mcpListTools: (serverConfigs: McpServerConfig[]) => ipcRenderer.invoke('mcp:listTools', serverConfigs),
+  mcpCallTool: (
+    serverConfig: McpServerConfig,
+    toolName: string,
+    args: unknown,
+    toolCallId?: string,
+  ) => ipcRenderer.invoke('mcp:callTool', serverConfig, toolName, args, toolCallId),
+  onMcpEvent: (callback: (event: McpEvent) => void) =>
+    ipcRenderer.on('mcp:event', (_event, value) => callback(value)),
   openImageWithSystem: (url: string) => ipcRenderer.send('openImageWithSystem', url),
   openImageInFolder: (url: string) => ipcRenderer.send('openImageInFolder', url),
   setFullScreen: (enable: boolean) => ipcRenderer.send('setFullScreen', enable),

@@ -6,14 +6,17 @@ import {
   type FileUIPart,
   DefaultChatTransport,
   LanguageModelUsage,
+  stepCountIs,
   streamText,
   UIDataTypes,
   UIMessage,
+  type ToolSet,
 } from 'ai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { useTextInference } from './textInference'
 import { useConversations } from './conversations'
-import { availableTools } from '../tools/tools'
+import { getAvailableTools } from '../tools/tools'
+import { useMcp } from './mcp'
 import z from 'zod'
 import { AipgTools } from '../tools/tools'
 import * as toast from '../toast'
@@ -62,11 +65,56 @@ export type AipgMetadata = {
 
 export type AipgUiMessage = UIMessage<AipgMetadata, UIDataTypes, AipgTools>
 
+function getMcpToolErrorText(output: unknown): string | null {
+  if (!output || typeof output !== 'object') return null
+
+  const data = output as {
+    structuredContent?: { status?: string; message?: string }
+    content?: Array<{ type?: string; text?: string }>
+    isError?: boolean
+  }
+
+  if (data.structuredContent?.status?.toLowerCase() === 'error') {
+    return data.structuredContent.message ?? 'Tool execution failed.'
+  }
+
+  const textPart = data.content?.find(
+    (part) => part.type === 'text' && typeof part.text === 'string',
+  )
+  if (!textPart?.text) return null
+
+  try {
+    const parsed = JSON.parse(textPart.text) as { status?: string; message?: string }
+    if (parsed.status?.toLowerCase() === 'error') {
+      return parsed.message ?? textPart.text
+    }
+  } catch {
+    if (data.isError === true) {
+      return textPart.text
+    }
+  }
+
+  return data.isError === true ? textPart.text : null
+}
+
+function buildToolRepairSystemPrompt(baseSystemPrompt: string, toolName: string, errorText: string) {
+  return [
+    baseSystemPrompt,
+    'The previous tool call failed.',
+    `Failed tool: ${toolName}`,
+    'Read the tool error carefully and fix only the invalid part of the previous tool input.',
+    'Retry using the tool with the minimal corrected input.',
+    'Do not repeat the same failing API usage. Do not explain the error unless the retry also fails.',
+    `Tool error:\n${errorText}`,
+  ].join('\n\n')
+}
+
 export const useOpenAiCompatibleChat = defineStore(
   'openAiCompatibleChat',
   () => {
     const textInference = useTextInference()
     const conversations = useConversations()
+    const mcp = useMcp()
     const manuallyStopped = ref(false)
 
     const processing = computed(() => {
@@ -177,6 +225,12 @@ export const useOpenAiCompatibleChat = defineStore(
         systemPromptToUse,
         shouldEnableTools,
       })
+
+      const toolsToUse: ToolSet | undefined = shouldEnableTools ? await getAvailableTools() : undefined
+      const activeTools =
+        shouldEnableTools && messageInput.value
+          ? mcp.getSuggestedActiveToolNames(messageInput.value)
+          : null
       const result = await streamText({
         model: model.value,
         messages,
@@ -185,11 +239,43 @@ export const useOpenAiCompatibleChat = defineStore(
         maxOutputTokens: textInference.maxTokens,
         temperature: textInference.temperature,
         includeRawChunks: true,
-        ...(shouldEnableTools
+        ...(toolsToUse
           ? {
-              tools: availableTools,
+              tools: toolsToUse,
+              stopWhen: stepCountIs(5),
+              ...(activeTools && activeTools.length > 0
+                ? {
+                    activeTools,
+                  }
+                : {}),
             }
           : {}),
+        prepareStep: ({ steps }) => {
+          const lastStep = steps.at(-1)
+          const lastDynamicToolResult = lastStep?.dynamicToolResults.at(-1)
+          if (!lastDynamicToolResult) {
+            return undefined
+          }
+
+          const errorText = getMcpToolErrorText(lastDynamicToolResult.output)
+          if (!errorText) {
+            return undefined
+          }
+
+          return {
+            system: buildToolRepairSystemPrompt(
+              systemPromptToUse,
+              lastDynamicToolResult.toolName,
+              errorText,
+            ),
+            toolChoice: 'required' as const,
+            ...(activeTools && activeTools.length > 0
+              ? {
+                  activeTools,
+                }
+              : {}),
+          }
+        },
         onChunk: (chunk) => {
           if (chunk.chunk.type === 'raw') {
             const rawValue = LlamaCppRawValueSchema.safeParse(chunk.chunk.rawValue)
