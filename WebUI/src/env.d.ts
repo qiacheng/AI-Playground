@@ -96,6 +96,16 @@ type electronAPI = {
   getDownloadedEmbeddingModels(): Promise<Model[]>
   getComfyUIModels(modelType: string): Promise<string[]>
   getPlatform(): Promise<NodeJS.Platform>
+  mcpListTools(
+    serverConfigs: import('@/types/mcp').McpServerConfig[],
+  ): Promise<import('@/types/mcp').McpListToolsResult>
+  mcpCallTool(
+    serverConfig: import('@/types/mcp').McpServerConfig,
+    toolName: string,
+    args: unknown,
+    toolCallId?: string,
+  ): Promise<import('@/types/mcp').McpToolCallResult>
+  onMcpEvent(callback: (event: import('@/types/mcp').McpEvent) => void): void
   openImageWithSystem(url: string): void
   openImageInFolder(url: string): void
   setFullScreen(enable: boolean): void

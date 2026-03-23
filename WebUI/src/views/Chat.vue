@@ -173,17 +173,11 @@
                   "
                 ></div>
               </template>
-              <div
-                v-html="
-                  sanitizeMarkdown(
-                    parse(message.parts.find((part) => part.type === 'text')?.text ?? '') as string,
-                  )
-                "
-              ></div>
-
-              <!-- Render tool parts -->
+              <!-- Render tool parts before the final assistant text -->
               <template
-                v-for="part in message.parts.filter((p) => p.type.startsWith('tool-'))"
+                v-for="part in message.parts.filter(
+                  (p) => p.type.startsWith('tool-') || p.type === 'dynamic-tool',
+                )"
                 :key="
                   part.type === 'tool-comfyUI'
                     ? `tool-${part.toolCallId}`
@@ -191,20 +185,22 @@
                       ? `tool-${part.toolCallId}`
                       : part.type === 'tool-visualizeObjectDetections'
                         ? `tool-${part.toolCallId}`
-                        : undefined
+                        : part.type === 'dynamic-tool'
+                          ? `dynamic-tool-${part.toolCallId}`
+                          : undefined
                 "
               >
-                <span>I'm using the tool {{ part.type.replace('tool-', '') }}</span>
                 <template v-if="part.type === 'tool-comfyUI'">
                   <div class="mt-1 pt-1">
+                    <span>Using tool {{ part.type.replace('tool-', '') }}</span>
                     <span
                       >Generating using the preset
-                      <b>{{ part.input?.workflow ?? 'unknown' }}</b></span
+                      <b>{{ getToolInputWorkflow(part) ?? 'unknown' }}</b></span
                     >
                     <br />
                     <br />
                     <span
-                      ><em>{{ part.input?.prompt ?? '' }}</em></span
+                      ><em>{{ getToolInputPrompt(part) }}</em></span
                     >
                     <ChatWorkflowResult
                       :images="getToolImages(part)"
@@ -217,13 +213,15 @@
                 </template>
                 <template v-else-if="part.type === 'tool-comfyUiImageEdit'">
                   <div class="mt-1 pt-1">
+                    <span>Using tool {{ part.type.replace('tool-', '') }}</span>
                     <span
-                      >Editing using the preset <b>{{ part.input?.workflow ?? 'unknown' }}</b></span
+                      >Editing using the preset
+                      <b>{{ getToolInputWorkflow(part) ?? 'unknown' }}</b></span
                     >
                     <br />
                     <br />
                     <span
-                      ><em>{{ part.input?.prompt ?? '' }}</em></span
+                      ><em>{{ getToolInputPrompt(part) }}</em></span
                     >
                     <ChatWorkflowResult
                       :images="getToolImages(part)"
@@ -236,6 +234,7 @@
                 </template>
                 <template v-else-if="part.type === 'tool-visualizeObjectDetections'">
                   <div class="mt-1 pt-1">
+                    <span>Using tool {{ part.type.replace('tool-', '') }}</span>
                     <div
                       v-if="
                         part.state === 'output-available' && (part as any).output?.annotatedImageUrl
@@ -256,7 +255,80 @@
                     </div>
                   </div>
                 </template>
+                <template v-else-if="part.type === 'dynamic-tool'">
+                  <div class="mt-1 pt-1 rounded-md border border-border bg-muted/40 px-3 py-2">
+                    <div class="flex items-center gap-2 text-sm">
+                      <span class="font-medium">{{ getDynamicToolSummary(message, part) }}</span>
+                      <span
+                        v-if="getDynamicToolDurationLabel(part) !== null"
+                        class="inline-flex items-center gap-2 text-xs text-muted-foreground"
+                      >
+                        <span
+                          v-if="part.state === 'input-streaming' || part.state === 'input-available'"
+                          class="inline-block h-2 w-2 animate-pulse rounded-full bg-primary"
+                        ></span>
+                        <span>{{ getDynamicToolDurationLabel(part) }}</span>
+                      </span>
+                    </div>
+                    <div
+                      v-if="part.state === 'input-streaming' || part.state === 'input-available'"
+                      class="text-sm text-muted-foreground mt-1"
+                    >
+                      Executing MCP tool...
+                    </div>
+                    <div
+                      v-if="getDynamicToolProgressLabel(part.toolCallId)"
+                      class="mt-1 text-xs text-muted-foreground"
+                    >
+                      {{ getDynamicToolProgressLabel(part.toolCallId) }}
+                    </div>
+                    <div v-if="part.state === 'output-error'" class="text-sm text-destructive mt-1">
+                      {{ getDynamicToolVisibleSummary(part) }}
+                    </div>
+                    <pre
+                      v-else-if="part.state === 'output-available'"
+                      class="mt-2 whitespace-pre-wrap break-words text-xs"
+                      >{{ getDynamicToolVisibleSummary(part) }}</pre
+                    >
+                    <details class="mt-2 text-xs" v-if="shouldShowDynamicToolDetails(part)">
+                      <summary class="cursor-pointer text-muted-foreground">Toggle content</summary>
+                      <div class="mt-2 rounded border border-border/60 bg-background/60 px-2 py-2">
+                        <div class="font-medium text-muted-foreground">Arguments:</div>
+                        <pre class="mt-1 whitespace-pre-wrap break-words">{{
+                          formatJsonBlock(part.input)
+                        }}</pre>
+                        <div
+                          v-if="
+                            part.state === 'output-available' ||
+                            part.state === 'output-error'
+                          "
+                          class="mt-2 font-medium text-muted-foreground"
+                        >
+                          Result:
+                        </div>
+                        <pre
+                          v-if="part.state === 'output-available'"
+                          class="mt-1 whitespace-pre-wrap break-words"
+                          >{{ formatJsonBlock(part.output) }}</pre
+                        >
+                        <pre
+                          v-else-if="part.state === 'output-error'"
+                          class="mt-1 whitespace-pre-wrap break-words text-destructive"
+                          >{{ part.errorText }}</pre
+                        >
+                      </div>
+                    </details>
+                  </div>
+                </template>
               </template>
+              <div
+                v-if="message.parts.find((part) => part.type === 'text')?.text"
+                v-html="
+                  sanitizeMarkdown(
+                    parse(message.parts.find((part) => part.type === 'text')?.text ?? '') as string,
+                  )
+                "
+              ></div>
             </div>
             <div class="answer-tools flex gap-3 items-center text-muted-foreground">
               <button
@@ -320,7 +392,7 @@ import { parse } from '@/assets/js/markdownParser.ts'
 import { sanitizeMarkdown } from '@/lib/sanitize'
 import LoadingBar from '@/components/LoadingBar.vue'
 import { usePromptStore } from '@/assets/js/store/promptArea.ts'
-import { useOpenAiCompatibleChat } from '@/assets/js/store/openAiCompatibleChat'
+import { AipgUiMessage, useOpenAiCompatibleChat } from '@/assets/js/store/openAiCompatibleChat'
 import ChatWorkflowResult from '@/components/ChatWorkflowResult.vue'
 import {
   useImageGenerationPresets,
@@ -328,7 +400,7 @@ import {
   type GenerateState,
 } from '@/assets/js/store/imageGenerationPresets'
 import { useComfyUiPresets } from '@/assets/js/store/comfyUiPresets'
-import { ToolUIPart } from 'ai'
+import { DynamicToolUIPart, ToolUIPart } from 'ai'
 import { AipgTools } from '@/assets/js/tools/tools'
 import { base64ToString } from 'uint8array-extras'
 import { UserCircleIcon } from '@heroicons/vue/24/outline'
@@ -344,10 +416,15 @@ const languages = i18nState
 const autoScrollEnabled = ref(true)
 const showScrollButton = ref(false)
 const chatPanel = ref<HTMLElement | null>(null)
+const currentTime = ref(Date.now())
 
 const activeConversation = computed(() => openAiCompatibleChat.messages)
 const showThinkingTextPerMessageId = reactive<Record<string, boolean>>({})
 const showRagSourcePerMessageId = reactive<Record<string, boolean>>({})
+const dynamicToolStartedAt = reactive<Record<string, number>>({})
+const dynamicToolFinishedAt = reactive<Record<string, number>>({})
+const dynamicToolProgress = reactive<Record<string, { progress?: number; total?: number }>>({})
+let currentTimeInterval: number | null = null
 
 const ragSourcePerMessageId = reactive<Record<string, string>>({})
 
@@ -372,11 +449,28 @@ defineExpose({
 onMounted(() => {
   promptStore.registerSubmitCallback('chat', handlePromptSubmit)
   promptStore.registerCancelCallback('chat', handleCancel)
+  window.electronAPI.onMcpEvent((event) => {
+    if (!event.toolCallId) return
+
+    if (event.type === 'progress') {
+      dynamicToolProgress[event.toolCallId] = {
+        progress: event.progress,
+        total: event.total,
+      }
+    }
+  })
+
+  currentTimeInterval = window.setInterval(() => {
+    currentTime.value = Date.now()
+  }, 1000)
 })
 
 onUnmounted(() => {
   promptStore.unregisterSubmitCallback('chat')
   promptStore.unregisterCancelCallback('chat')
+  if (currentTimeInterval !== null) {
+    window.clearInterval(currentTimeInterval)
+  }
 })
 
 watch(
@@ -486,7 +580,8 @@ function getToolImages(part: ToolUIPart<AipgTools>): MediaItem[] {
   // Otherwise, use output images if available
   if (part.state === 'output-available') {
     if (!part.output) return []
-    return part.output.images.map((img) => ({ ...img, state: 'done' as const }))
+    const output = part.output as { images?: MediaItem[] }
+    return (output.images ?? []).map((img) => ({ ...img, state: 'done' as const }))
   }
 
   return []
@@ -527,6 +622,227 @@ function getToolStepText(part: ToolUIPart<AipgTools>): string | undefined {
   return undefined
 }
 
+function getToolInputWorkflow(part: ToolUIPart<AipgTools>) {
+  const input = part.input as { workflow?: string } | undefined
+  return input?.workflow
+}
+
+function getToolInputPrompt(part: ToolUIPart<AipgTools>) {
+  const input = part.input as { prompt?: string } | undefined
+  return input?.prompt ?? ''
+}
+
+function formatDynamicToolOutput(output: DynamicToolUIPart['output']) {
+  if (typeof output === 'string') return output
+
+  if (output && typeof output === 'object') {
+    const mcpOutput = output as {
+      content?: Array<{ type?: string; text?: string }>
+      structuredContent?: { content?: string }
+    }
+
+    const textBlocks =
+      mcpOutput.content
+        ?.filter((part) => part.type === 'text' && typeof part.text === 'string')
+        .map((part) => part.text!.trim())
+        .filter((text) => text.length > 0) ?? []
+
+    if (textBlocks.length > 0) {
+      return textBlocks.join('\n\n')
+    }
+
+    if (typeof mcpOutput.structuredContent?.content === 'string') {
+      return mcpOutput.structuredContent.content
+    }
+  }
+
+  try {
+    return JSON.stringify(output, null, 2)
+  } catch {
+    return String(output)
+  }
+}
+
+function getDynamicToolVisibleSummary(part: DynamicToolUIPart) {
+  if (part.state === 'output-error') {
+    return summarizeDynamicToolReason(part.errorText) ?? 'Tool execution failed.'
+  }
+
+  if (part.state === 'output-available') {
+    const output = part.output
+    if (output && typeof output === 'object') {
+      const mcpOutput = output as {
+        structuredContent?: { status?: string; message?: string; result?: unknown }
+      }
+
+      if (mcpOutput.structuredContent?.status?.toLowerCase() === 'error') {
+        return (
+          summarizeDynamicToolReason(mcpOutput.structuredContent.message ?? '') ??
+          'Tool execution failed.'
+        )
+      }
+
+      if (mcpOutput.structuredContent?.status?.toLowerCase() === 'ok') {
+        const resultSummary = summarizeToolResultObject(mcpOutput.structuredContent.result)
+        return resultSummary ?? 'Completed successfully.'
+      }
+    }
+
+    const summarized = summarizeDynamicToolReason(formatDynamicToolOutput(output))
+    return summarized ?? 'Completed successfully.'
+  }
+
+  return 'Executing MCP tool...'
+}
+
+function formatJsonBlock(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function getDynamicToolDurationLabel(part: DynamicToolUIPart) {
+  const toolCallId = part.toolCallId
+  const startedAt = dynamicToolStartedAt[toolCallId]
+  const isRunning = part.state === 'input-streaming' || part.state === 'input-available'
+  if (!startedAt) {
+    return isRunning ? 'Running' : null
+  }
+
+  const finishedAt = isRunning ? currentTime.value : (dynamicToolFinishedAt[toolCallId] ?? currentTime.value)
+  const elapsedSeconds = Math.max(0, Math.floor((finishedAt - startedAt) / 1000))
+  if (!isRunning && elapsedSeconds === 0) {
+    return null
+  }
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds}s`
+  }
+
+  const minutes = Math.floor(elapsedSeconds / 60)
+  const seconds = elapsedSeconds % 60
+  return `${minutes}m ${seconds}s`
+}
+
+function getDynamicToolProgressLabel(toolCallId: string) {
+  const progress = dynamicToolProgress[toolCallId]
+  if (!progress) return null
+  if (typeof progress.progress !== 'number') return null
+  if (typeof progress.total === 'number' && progress.total > 0) {
+    const percent = Math.max(0, Math.min(100, (progress.progress / progress.total) * 100))
+    return `${percent.toFixed(0)}% (${progress.progress}/${progress.total})`
+  }
+  return `${progress.progress}`
+}
+
+function getDynamicToolSummary(message: AipgUiMessage, part: DynamicToolUIPart) {
+  const dynamicParts = message.parts.filter(
+    (item): item is DynamicToolUIPart => item.type === 'dynamic-tool',
+  )
+  const currentIndex = dynamicParts.findIndex((item) => item.toolCallId === part.toolCallId)
+  const attempt = currentIndex + 1
+
+  if (attempt <= 1) {
+    const reason = getDynamicToolRetryReason(part)
+    if (part.state === 'output-error' && reason) {
+      return `Attempt 1 failed: ${reason}`
+    }
+    if (part.state === 'output-available') {
+      return 'Attempt 1 succeeded'
+    }
+    return 'Attempt 1'
+  }
+
+  const previousMatchingPart = [...dynamicParts.slice(0, currentIndex)]
+    .reverse()
+    .find((item) => item.toolName === part.toolName)
+
+  const retryReason = previousMatchingPart ? getDynamicToolRetryReason(previousMatchingPart) : null
+  return retryReason ? `Retry ${attempt} after ${retryReason}` : `Retry ${attempt}`
+}
+
+function getDynamicToolRetryReason(part: DynamicToolUIPart) {
+  const errorText =
+    part.state === 'output-error'
+      ? part.errorText
+      : part.state === 'output-available'
+        ? formatDynamicToolOutput(part.output)
+        : ''
+
+  return summarizeDynamicToolReason(errorText)
+}
+
+function summarizeDynamicToolReason(text: string) {
+  if (!text) return null
+
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  const keywordMatch = normalized.match(/keyword\s+"([^"]+)"\s+unrecognized/i)
+  if (keywordMatch?.[1]) {
+    return `keyword "${keywordMatch[1]}" unrecognized`
+  }
+
+  const typeErrorMatch = normalized.match(/TypeError:\s*(.+?)(?:Traceback|$)/i)
+  if (typeErrorMatch?.[1]) {
+    return typeErrorMatch[1].trim()
+  }
+
+  const attributeErrorMatch = normalized.match(/AttributeError:\s*(.+?)(?:Traceback|$)/i)
+  if (attributeErrorMatch?.[1]) {
+    return attributeErrorMatch[1].trim()
+  }
+
+  const messageMatch = normalized.match(/"message"\s*:\s*"(.+?)"/)
+  if (messageMatch?.[1]) {
+    return messageMatch[1].trim()
+  }
+
+  if (normalized.length <= 96) {
+    return normalized
+  }
+
+  return `${normalized.slice(0, 93).trim()}...`
+}
+
+function summarizeToolResultObject(result: unknown) {
+  if (!result || typeof result !== 'object') {
+    return null
+  }
+
+  const data = result as Record<string, unknown>
+  const status = typeof data.status === 'string' ? data.status : null
+  const objectName = typeof data.object_name === 'string' ? data.object_name : null
+  const message = typeof data.message === 'string' ? data.message : null
+
+  if (status === 'success' && objectName) {
+    return `Created "${objectName}".`
+  }
+
+  if (message) {
+    return summarizeDynamicToolReason(message) ?? message
+  }
+
+  const scalarEntries = Object.entries(data)
+    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+    .slice(0, 3)
+
+  if (scalarEntries.length === 0) {
+    return null
+  }
+
+  return scalarEntries.map(([key, value]) => `${key}: ${String(value)}`).join(', ')
+}
+
+function shouldShowDynamicToolDetails(part: DynamicToolUIPart) {
+  return part.state === 'output-error' || part.state === 'output-available'
+}
+
+function isComfyToolPart(
+  part: ToolUIPart<AipgTools> | DynamicToolUIPart | AipgUiMessage['parts'][number],
+): part is ToolUIPart<AipgTools> {
+  return part.type === 'tool-comfyUI' || part.type === 'tool-comfyUiImageEdit'
+}
+
 // Watch for new tool calls starting to initialize their image tracking
 watch(
   () => activeConversation.value,
@@ -536,7 +852,21 @@ watch(
     // Find tool calls that just started (input-streaming or input-available)
     messages.forEach((msg) => {
       msg.parts.forEach((part) => {
-        if (part.type === 'tool-comfyUI' || part.type === 'tool-comfyUiImageEdit') {
+        if (part.type === 'dynamic-tool' && !dynamicToolStartedAt[part.toolCallId]) {
+          dynamicToolStartedAt[part.toolCallId] = Date.now()
+        }
+
+        if (part.type === 'dynamic-tool' && part.state === 'output-available') {
+          dynamicToolFinishedAt[part.toolCallId] ??= Date.now()
+          delete dynamicToolProgress[part.toolCallId]
+        }
+
+        if (part.type === 'dynamic-tool' && part.state === 'output-error') {
+          dynamicToolFinishedAt[part.toolCallId] ??= Date.now()
+          delete dynamicToolProgress[part.toolCallId]
+        }
+
+        if (isComfyToolPart(part)) {
           const toolCallId = part.toolCallId
           const state = part.state
 
@@ -573,11 +903,8 @@ watch(
     const activeToolParts =
       activeConversation.value
         ?.flatMap((msg) => msg.parts)
-        .filter(
-          (part) =>
-            (part.type === 'tool-comfyUI' || part.type === 'tool-comfyUiImageEdit') &&
-            (part.state === 'input-streaming' || part.state === 'input-available'),
-        )
+        .filter(isComfyToolPart)
+        .filter((part) => part.state === 'input-streaming' || part.state === 'input-available')
         .map((part) => ({
           toolCallId: part.toolCallId,
           part,
@@ -620,11 +947,8 @@ watch(
     const activeToolCallIds = new Set(
       activeConversation.value
         ?.flatMap((msg) => msg.parts)
-        .filter(
-          (part) =>
-            (part.type === 'tool-comfyUI' || part.type === 'tool-comfyUiImageEdit') &&
-            (part.state === 'input-streaming' || part.state === 'input-available'),
-        )
+        .filter(isComfyToolPart)
+        .filter((part) => part.state === 'input-streaming' || part.state === 'input-available')
         .map((part) => part.toolCallId) || [],
     )
 
