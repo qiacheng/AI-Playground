@@ -138,6 +138,8 @@ dependencies = [
     { name = "kornia", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
     { name = "librosa", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
     { name = "llvmlite", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
+    { name = "lxml", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
+    { name = "mako", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
     { name = "matrix-nio", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
     { name = "mediapipe", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
@@ -235,7 +237,7 @@ requires-dist = [
     { name = "ftfy" },
     { name = "fvcore" },
     { name = "gguf", specifier = ">=0.13.0" },
-    { name = "gitpython" },
+    { name = "gitpython", specifier = ">=3.1.49" },
     { name = "huggingface-hub", specifier = ">0.20" },
     { name = "imageio-ffmpeg" },
     { name = "importlib-metadata" },
@@ -245,6 +247,8 @@ requires-dist = [
     { name = "kornia", specifier = ">=0.7.1" },
     { name = "librosa" },
     { name = "llvmlite", specifier = ">=0.46.0" },
+    { name = "lxml", specifier = ">=6.1.0" },
+    { name = "mako", specifier = ">=1.3.12" },
     { name = "matplotlib" },
     { name = "matrix-nio" },
     { name = "mediapipe", specifier = ">=0.10.32" },
@@ -913,14 +917,14 @@ wheels = [
 
 [[package]]
 name = "gitpython"
-version = "3.1.46"
+version = "3.1.49"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gitdb", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/df/b5/59d16470a1f0dfe8c793f9ef56fd3826093fc52b3bd96d6b9d6c26c7e27b/gitpython-3.1.46.tar.gz", hash = "sha256:400124c7d0ef4ea03f7310ac2fbf7151e09ff97f2a3288d64a440c584a29c37f", size = 215371, upload-time = "2026-01-01T15:37:32.073Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/63/210aaa302d6a0a78daa67c5c15bbac2cad361722841278b0209b6da20855/gitpython-3.1.49.tar.gz", hash = "sha256:42f9399c9eb33fc581014bedd76049dfbaf6375aa2a5754575966387280315e1", size = 219367, upload-time = "2026-04-29T00:31:20.478Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/09/e21df6aef1e1ffc0c816f0522ddc3f6dcded766c3261813131c78a704470/gitpython-3.1.46-py3-none-any.whl", hash = "sha256:79812ed143d9d25b6d176a10bb511de0f9c67b1fa641d82097b0ab90398a2058", size = 208620, upload-time = "2026-01-01T15:37:30.574Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/6f/b842bfa6f21d6f87c57f9abf7194225e55279d96d869775e19e9f7236fc5/gitpython-3.1.49-py3-none-any.whl", hash = "sha256:024b0422d7f84d15cd794844e029ffebd4c5d42a7eb9b936b458697ef550a02c", size = 212190, upload-time = "2026-04-29T00:31:18.412Z" },
 ]
 
 [[package]]
@@ -1391,27 +1395,27 @@ wheels = [
 
 [[package]]
 name = "lxml"
-version = "6.0.4"
+version = "6.1.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ce/08/1217ca4043f55c3c92993b283a7dbfa456a2058d8b57bbb416cc96b6efff/lxml-6.0.4.tar.gz", hash = "sha256:4137516be2a90775f99d8ef80ec0283f8d78b5d8bd4630ff20163b72e7e9abf2", size = 4237780, upload-time = "2026-04-12T16:28:24.182Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/28/30/9abc9e34c657c33834eaf6cd02124c61bdf5944d802aa48e69be8da3585d/lxml-6.1.0.tar.gz", hash = "sha256:bfd57d8008c4965709a919c3e9a98f76c2c7cb319086b3d26858250620023b13", size = 4197006, upload-time = "2026-04-18T04:32:51.613Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/18/4732abab49bbb041b1ded9dd913ca89735a0dcca038eacec64c44ba02163/lxml-6.0.4-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:af0b8459c4e21a8417db967b2e453d1855022dac79c79b61fb8214f3da50f17e", size = 8570033, upload-time = "2026-04-12T16:24:10.728Z" },
-    { url = "https://files.pythonhosted.org/packages/72/7e/38523ec7178ca35376551911455d1b2766bc9d98bcc18f606a167fa9ecbb/lxml-6.0.4-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:e0cdcea2affa53fa17dc4bf5cefc0edf72583eac987d669493a019998a623fa3", size = 4623270, upload-time = "2026-04-12T16:24:13.2Z" },
-    { url = "https://files.pythonhosted.org/packages/65/8f/141734f2c456f2253fed4237d8d4b241e3d701129cf6f0b135ccf241a75a/lxml-6.0.4-cp312-cp312-win32.whl", hash = "sha256:b2209b310e7ed1d4cd1c00d405ec9c49722fce731c7036abc1d876bf8df78139", size = 3594958, upload-time = "2026-04-12T16:24:45.039Z" },
-    { url = "https://files.pythonhosted.org/packages/b7/a9/c6d3531c6d8814af0919fbdb9bda43c9e8b5deffcb70c8534017db233512/lxml-6.0.4-cp312-cp312-win_amd64.whl", hash = "sha256:03affcacfba4671ebc305813b02bfaf34d80b6a7c5b23eafc5d6da14a1a6e623", size = 3995897, upload-time = "2026-04-12T16:24:46.98Z" },
-    { url = "https://files.pythonhosted.org/packages/03/5d/1dabeddf762e5a315a31775b2bca39811d7e7a15fc3e677d044b9da973fe/lxml-6.0.4-cp312-cp312-win_arm64.whl", hash = "sha256:af9678e3a2a047465515d95a61690109af7a4c9486f708249119adcef7861049", size = 3658607, upload-time = "2026-04-12T16:24:49.19Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/d4/9326838b59dc36dfae42eec9656b97520f9997eee1de47b8316aaeed169c/lxml-6.1.0-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:d2f17a16cd8751e8eb233a7e41aecdf8e511712e00088bf9be455f604cd0d28d", size = 8570663, upload-time = "2026-04-18T04:27:48.253Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/a4/053745ce1f8303ccbb788b86c0db3a91b973675cefc42566a188637b7c40/lxml-6.1.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:f0cea5b1d3e6e77d71bd2b9972eb2446221a69dc52bb0b9c3c6f6e5700592d93", size = 4624024, upload-time = "2026-04-18T04:27:52.594Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/3a/ac3f99ec8ac93089e7dd556f279e0d14c24de0a74a507e143a2e4b496e7c/lxml-6.1.0-cp312-cp312-win32.whl", hash = "sha256:56971379bc5ee8037c5a0f09fa88f66cdb7d37c3e38af3e45cf539f41131ac1f", size = 3596289, upload-time = "2026-04-18T04:27:42.819Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/a7/0a915557538593cb1bbeedcd40e13c7a261822c26fecbbdb71dad0c2f540/lxml-6.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:bba078de0031c219e5dd06cf3e6bf8fb8e6e64a77819b358f53bb132e3e03366", size = 3997059, upload-time = "2026-04-18T04:27:46.764Z" },
+    { url = "https://files.pythonhosted.org/packages/92/96/a5dc078cf0126fbfbc35611d77ecd5da80054b5893e28fb213a5613b9e1d/lxml-6.1.0-cp312-cp312-win_arm64.whl", hash = "sha256:c3592631e652afa34999a088f98ba7dfc7d6aff0d535c410bea77a71743f3819", size = 3659552, upload-time = "2026-04-18T04:27:51.133Z" },
 ]
 
 [[package]]
 name = "mako"
-version = "1.3.10"
+version = "1.3.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markupsafe", marker = "sys_platform == 'darwin' or sys_platform == 'win32' or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9e/38/bd5b78a920a64d708fe6bc8e0a2c075e1389d53bef8413725c63ba041535/mako-1.3.10.tar.gz", hash = "sha256:99579a6f39583fa7e5630a28c3c1f440e4e97a414b80372649c0ce338da2ea28", size = 392474, upload-time = "2025-04-10T12:44:31.16Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/62/791b31e69ae182791ec67f04850f2f062716bbd205483d63a215f3e062d3/mako-1.3.12.tar.gz", hash = "sha256:9f778e93289bd410bb35daadeb4fc66d95a746f0b75777b942088b7fd7af550a", size = 400219, upload-time = "2026-04-28T19:01:08.512Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/87/fb/99f81ac72ae23375f22b7afdb7642aba97c00a713c217124420147681a2f/mako-1.3.10-py3-none-any.whl", hash = "sha256:baef24a52fc4fc514a0887ac600f9f1cff3d82c61d4d700a1fa84d597b88db59", size = 78509, upload-time = "2025-04-10T12:50:53.297Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/b1/a0ec7a5a9db730a08daef1fdfb8090435b82465abbf758a596f0ea88727e/mako-1.3.12-py3-none-any.whl", hash = "sha256:8f61569480282dbf557145ce441e4ba888be453c30989f879f0d652e39f53ea9", size = 78521, upload-time = "2026-04-28T19:01:10.393Z" },
 ]
 
 [[package]]
@@ -2723,7 +2727,7 @@ dependencies = [
     { name = "typing-extensions", marker = "(sys_platform == 'darwin' and extra == 'extra-12-aipg-comfyui-cpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.11.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:43b35116802c85fb88d99f4a396b8bd4472bfca1dd82e69499e5a4f9b8b4e252" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.11.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:43b35116802c85fb88d99f4a396b8bd4472bfca1dd82e69499e5a4f9b8b4e252", upload-time = "2026-03-23T15:16:58Z" },
 ]
 
 [[package]]
@@ -2768,7 +2772,7 @@ dependencies = [
     { name = "typing-extensions", marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-cpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp312-cp312-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:1abeaa46fa7532ed35ed79146f4de5d7a9d4b30462c98052ea4ddfe781ea3eca", upload-time = "2026-04-28T00:06:34Z" },
 ]
 
 [[package]]
@@ -2789,7 +2793,7 @@ dependencies = [
     { name = "typing-extensions", marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:7c78215c3af4f62e63f2b2e360f1722fc719b0853c7ac22666483d9810613a4c", upload-time = "2026-04-27T17:43:49Z" },
 ]
 
 [[package]]
@@ -2829,7 +2833,7 @@ dependencies = [
     { name = "umf", marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/xpu/torch-2.11.0%2Bxpu-cp312-cp312-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/xpu/torch-2.11.0%2Bxpu-cp312-cp312-win_amd64.whl", upload-time = "2026-03-23T15:12:35Z" },
 ]
 
 [[package]]
@@ -2841,7 +2845,7 @@ resolution-markers = [
     "platform_machine == 's390x' and sys_platform == 'darwin'",
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torchaudio-2.11.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a1cf1acc883bee9cb906a933572fed6a8a933f86ef34e9ea7d803f72317e8c1b" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torchaudio-2.11.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a1cf1acc883bee9cb906a933572fed6a8a933f86ef34e9ea7d803f72317e8c1b", upload-time = "2026-03-23T15:50:10Z" },
 ]
 
 [[package]]
@@ -2866,7 +2870,7 @@ resolution-markers = [
     "platform_machine == 's390x' and sys_platform == 'win32'",
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torchaudio-2.11.0%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:95d517bd1a0a28dacd1c37550ced95cab64f3a7a4ef9b8219b41049388a71163" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torchaudio-2.11.0%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:95d517bd1a0a28dacd1c37550ced95cab64f3a7a4ef9b8219b41049388a71163", upload-time = "2026-03-23T15:50:10Z" },
 ]
 
 [[package]]
@@ -2878,7 +2882,7 @@ resolution-markers = [
     "platform_machine == 's390x' and sys_platform == 'win32'",
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:e0203d44b6dcf4c59f2ce38f997616e663b2a23a9e0b20ebb90ea0c787b5e86a" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:e0203d44b6dcf4c59f2ce38f997616e663b2a23a9e0b20ebb90ea0c787b5e86a", upload-time = "2026-03-23T15:50:23Z" },
 ]
 
 [[package]]
@@ -2890,7 +2894,7 @@ resolution-markers = [
     "platform_machine == 's390x' and sys_platform == 'win32'",
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/xpu/torchaudio-2.11.0%2Bxpu-cp312-cp312-win_amd64.whl", hash = "sha256:ac6ea14f0d1a9f0056eb24ca168e37f70b9787122a6aaaeac5e395db10fa13e8" },
+    { url = "https://download-r2.pytorch.org/whl/xpu/torchaudio-2.11.0%2Bxpu-cp312-cp312-win_amd64.whl", hash = "sha256:ac6ea14f0d1a9f0056eb24ca168e37f70b9787122a6aaaeac5e395db10fa13e8", upload-time = "2026-03-23T15:50:42Z" },
 ]
 
 [[package]]
@@ -2926,7 +2930,7 @@ dependencies = [
     { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-12-aipg-comfyui-cpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torchvision-0.26.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c409e1c3fdebec7a3834465086dbda8bf7680eff79abf7fd2f10c6b59520a7a4" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torchvision-0.26.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c409e1c3fdebec7a3834465086dbda8bf7680eff79abf7fd2f10c6b59520a7a4", upload-time = "2026-03-23T15:36:09Z" },
 ]
 
 [[package]]
@@ -2963,7 +2967,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-cpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torchvision-0.26.0%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:52aa8401850a9792e71a8a1e65ac004e2b23622a6b6fd278cd11179efbefc65b" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torchvision-0.26.0%2Bcpu-cp312-cp312-win_amd64.whl", hash = "sha256:52aa8401850a9792e71a8a1e65ac004e2b23622a6b6fd278cd11179efbefc65b", upload-time = "2026-03-23T15:36:09Z" },
 ]
 
 [[package]]
@@ -2980,7 +2984,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:8c0d1c4fbb2c9a4d5d41d0aaa87da20e525bcb2a154ce405725b0be59456804b" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:8c0d1c4fbb2c9a4d5d41d0aaa87da20e525bcb2a154ce405725b0be59456804b", upload-time = "2026-04-09T23:21:36Z" },
 ]
 
 [[package]]
@@ -2997,7 +3001,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/xpu/torchvision-0.26.0%2Bxpu-cp312-cp312-win_amd64.whl", hash = "sha256:03788e0e5a5b85a2f09d11f0263d579fcb0cf5623d8810149be0e37836c2738c" },
+    { url = "https://download-r2.pytorch.org/whl/xpu/torchvision-0.26.0%2Bxpu-cp312-cp312-win_amd64.whl", hash = "sha256:03788e0e5a5b85a2f09d11f0263d579fcb0cf5623d8810149be0e37836c2738c", upload-time = "2026-03-23T15:36:39Z" },
 ]
 
 [[package]]
@@ -3086,7 +3090,7 @@ dependencies = [
     { name = "pyelftools", marker = "(sys_platform == 'win32' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cuda' and extra == 'extra-12-aipg-comfyui-xpu') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-cuda') or (extra == 'extra-12-aipg-comfyui-cpu' and extra == 'extra-12-aipg-comfyui-xpu')" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/triton_xpu-3.7.0-cp312-cp312-win_amd64.whl", hash = "sha256:5ba3a31c6e1b259ad2d924e1b50f72a78c6ebd7eb4f364473bbf93e144734e80" },
+    { url = "https://download-r2.pytorch.org/whl/triton_xpu-3.7.0-cp312-cp312-win_amd64.whl", hash = "sha256:5ba3a31c6e1b259ad2d924e1b50f72a78c6ebd7eb4f364473bbf93e144734e80", upload-time = "2026-03-23T21:56:51Z" },
 ]
 
 [[package]]
