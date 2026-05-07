@@ -55,6 +55,8 @@ export const useBackendServices = defineStore(
 
     // LlamaCPP startup parameters (persisted). null = use default from backend.
     const llamaCppParameters = ref<string | null>(null)
+    const llamaCppBuildVariant = ref<'standard' | 'ssd-offload'>('standard')
+    const llamaCppOffloadDrive = ref<string | null>(null)
 
     // Default parameters fetched from backend via IPC
     const llamaCppDefaultParameters = ref<string>('')
@@ -63,9 +65,22 @@ export const useBackendServices = defineStore(
     })
 
     // Effective parameters: user override or default
-    const effectiveLlamaCppParameters = computed(
-      () => llamaCppParameters.value ?? llamaCppDefaultParameters.value,
-    )
+    const effectiveLlamaCppParameters = computed(() => {
+      if (llamaCppParameters.value !== null) {
+        return llamaCppParameters.value
+      }
+
+      if (llamaCppBuildVariant.value === 'ssd-offload') {
+        const configPath =
+          currentServiceInfo.value.find((service) => service.serviceName === 'llamacpp-backend')
+            ?.llamaCppSsdOffloadConfigPath ?? ''
+        if (configPath) {
+          return `--config-file ${configPath}`
+        }
+      }
+
+      return llamaCppDefaultParameters.value
+    })
 
     // Full version state (not persisted - computed from live data + overrides)
     const versionState = ref<BackendVersionState>({
@@ -281,6 +296,8 @@ export const useBackendServices = defineStore(
       }
       if (serviceName === 'llamacpp-backend') {
         serviceSettings.llamaCppParameters = effectiveLlamaCppParameters.value
+        serviceSettings.llamaCppBuildVariant = llamaCppBuildVariant.value
+        serviceSettings.llamaCppOffloadDrive = llamaCppOffloadDrive.value
       }
       await updateServiceSettings(serviceSettings)
       window.electronAPI.setUpService(serviceName)
@@ -332,6 +349,8 @@ export const useBackendServices = defineStore(
         await updateServiceSettings({
           serviceName: 'llamacpp-backend',
           llamaCppParameters: effectiveLlamaCppParameters.value,
+          llamaCppBuildVariant: llamaCppBuildVariant.value,
+          llamaCppOffloadDrive: llamaCppOffloadDrive.value,
         })
       }
       return window.electronAPI.startService(serviceName)
@@ -492,6 +511,8 @@ export const useBackendServices = defineStore(
       comfyUiDefaultParameters,
       effectiveComfyUiParameters,
       llamaCppParameters,
+      llamaCppBuildVariant,
+      llamaCppOffloadDrive,
       llamaCppDefaultParameters,
       effectiveLlamaCppParameters,
       updateLastUsedBackend,
@@ -524,6 +545,8 @@ export const useBackendServices = defineStore(
         'lastSelectedDeviceIdPerBackend',
         'comfyUiParameters',
         'llamaCppParameters',
+        'llamaCppBuildVariant',
+        'llamaCppOffloadDrive',
       ],
     },
   },
