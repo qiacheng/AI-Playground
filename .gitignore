@@ -6,6 +6,7 @@ build_resources/
 build_envs/
 /build/
 release/
+WebUI/external/aidaptiv_config.json
 WebUI/external/device-service/
 WebUI/external/service/
 WebUI/external/workflows_intel/
