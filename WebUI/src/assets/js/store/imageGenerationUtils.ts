@@ -1,5 +1,6 @@
 import * as toast from '@/assets/js/toast.ts'
 import { useModels } from './models'
+import type { MegapixelOption, RequiredModel, ResolutionConfig } from './presets'
 
 // Fixed resolution lookup table ensuring consistent inversions between portrait/landscape pairs
 // All values are divisible by 32 (most by 64)
@@ -179,6 +180,18 @@ function extractDownloadModelParamsFromString(requiredModel: {
   }
 }
 
+export function dedupeRequiredModels(models: RequiredModel[]): RequiredModel[] {
+  const seen = new Set<string>()
+  const out: RequiredModel[] = []
+  for (const m of models) {
+    const key = `${m.type}\u0000${m.model}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(m)
+  }
+  return out
+}
+
 export async function getMissingComfyuiBackendModels(
   requiredModels: { type: string; model: string; additionalLicenceLink?: string }[],
 ): Promise<DownloadModelParam[]> {
@@ -201,8 +214,6 @@ export async function getMissingComfyuiBackendModels(
 // ============================================================================
 // Resolution Configuration Utilities
 // ============================================================================
-
-import type { ResolutionConfig, MegapixelOption } from './presets'
 
 /**
  * Default aspect ratios available for image generation (landscape to portrait order)

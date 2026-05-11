@@ -325,9 +325,8 @@ class HFPlaygroundDownloader:
             self.on_download_completed(self.repo_id, self.error)
         if not self.download_stop and self.error is None:
             self.move_to_desired_position()
-        else:
-            # Download aborted
-            shutil.rmtree(self.save_path_tmp)
+        # On failure or user cancel: keep save_path_tmp so the next attempt can resume
+        # partial files (Range requests / existing sizes in build_queue).
 
     def move_to_desired_position(self, retriable: bool = True):
         desired_repo_root_dir_name = os.path.join(
@@ -438,7 +437,18 @@ class HFPlaygroundDownloader:
                 while True:
                     try:
                         response, fw = self.init_download(file)
-                        if response.status_code != 200:
+                        expected_ok = (200, 206) if file.disk_file_size > 0 else (200,)
+                        if response.status_code == 416 and file.disk_file_size > 0:
+                            # Satisfied range invalid — treat as complete if file already matches size
+                            response.close()
+                            if path.exists(file.save_filename) and path.getsize(
+                                file.save_filename
+                            ) >= file.size:
+                                break
+                            download_retry += 1
+                            time.sleep(download_retry)
+                            continue
+                        if response.status_code not in expected_ok:
                             download_retry += 2  # we only want to retry once in case of non network errors
                             raise DownloadException(file.url)
                         # start download file

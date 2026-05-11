@@ -170,13 +170,21 @@
           </div>
         </div>
       </div>
-      <div class="flex flex-col pt-5">
+      <div class="flex flex-col pt-5 gap-3">
         <button
           :disabled="demoMode.enabled"
           @click="openSetupWizard"
           class="bg-primary hover:bg-primary/80 px-3 py-1.5 rounded-lg text-sm disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed"
         >
           {{ languages.SETTINGS_SETUP_WIZARD || 'Setup Wizard' }}
+        </button>
+        <button
+          type="button"
+          :disabled="demoMode.enabled"
+          @click="dialogStore.showPresetWorkflowModelsDialog()"
+          class="border border-border hover:bg-muted/80 px-3 py-1.5 rounded-lg text-sm text-left disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed"
+        >
+          {{ languages.SETTINGS_PRESET_MODELS_OPEN }}
         </button>
       </div>
     </div>

@@ -6,7 +6,7 @@ import { useDemoMode } from './demoMode'
 import { useI18N } from './i18n'
 import * as toast from '@/assets/js/toast.ts'
 import { useBackendServices } from './backendServices'
-import { usePresets, type ComfyInput } from './presets'
+import { usePresets, type ComfyInput, type RequiredModel } from './presets'
 
 /** Convert requiredModels "repo/path/file.safetensors" to ComfyUI format "repo---path\\file.safetensors" */
 function requiredModelToComfyUIName(modelPath: string): string {
@@ -34,7 +34,7 @@ export function modelNameForComfyApi(name: string, platform: NodeJS.Platform): s
 }
 import { useUIStore } from './ui'
 import { PresetRequirementsData, useDialogStore } from './dialogs'
-import { getMissingComfyuiBackendModels } from './imageGenerationUtils'
+import { dedupeRequiredModels, getMissingComfyuiBackendModels } from './imageGenerationUtils'
 import { imageUrlToDataUri, saveImageToMediaInput } from '@/lib/utils'
 import {
   getDemoModeInputImage,
@@ -109,6 +109,11 @@ export const isVideo = (item: MediaItem): item is VideoMediaItem => item.type ==
 export const is3D = (item: MediaItem): item is Model3DMediaItem => item.type === 'model3d'
 
 export const isImage = (item: MediaItem): item is ImageMediaItem => item.type === 'image'
+
+export type PresetModelSelection = {
+  presetName: string
+  variantName: string | null
+}
 
 const globalDefaultSettings = {
   seed: -1,
@@ -615,6 +620,21 @@ export const useImageGenerationPresets = defineStore(
       return getMissingComfyuiBackendModels(activePreset.value.requiredModels ?? [])
     }
 
+    async function getMissingModelsForPresetSelections(
+      selections: PresetModelSelection[],
+    ): Promise<DownloadModelParam[]> {
+      const merged: RequiredModel[] = []
+      for (const sel of selections) {
+        const base = presetsStore.presets.find((p) => p.name === sel.presetName)
+        if (!base || base.type !== 'comfy') continue
+        const resolved =
+          sel.variantName != null ? presetsStore.applyVariant(base, sel.variantName) : base
+        merged.push(...(resolved.requiredModels ?? []))
+      }
+      const deduped = dedupeRequiredModels(merged)
+      return getMissingComfyuiBackendModels(deduped)
+    }
+
     async function ensureModelsAreAvailable(): Promise<void> {
       return new Promise<void>(async (resolve, reject) => {
         const downloadList = await getMissingModels()
@@ -815,6 +835,7 @@ export const useImageGenerationPresets = defineStore(
       comfyInputs,
       resetActivePresetSettings,
       getMissingModels,
+      getMissingModelsForPresetSelections,
       ensureModelsAreAvailable,
       validatePresetRequirements,
       formatRequirementsForDialog,

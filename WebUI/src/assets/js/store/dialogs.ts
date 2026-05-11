@@ -38,6 +38,8 @@ export const useDialogStore = defineStore('dialog', () => {
   const warningConfirmFunction = ref<(_dontShowAgain?: boolean) => void>(() => {})
   const warningDontShowAgainKey = ref<string | null>(null)
 
+  const presetWorkflowModelsDialogVisible = ref(false)
+
   // Download dialog state
   const downloadDialogVisible = ref(false)
   const downloadList = ref<DownloadModelParam[]>([])
@@ -97,6 +99,14 @@ export const useDialogStore = defineStore('dialog', () => {
 
   function closeDownloadDialog() {
     downloadDialogVisible.value = false
+  }
+
+  function showPresetWorkflowModelsDialog() {
+    presetWorkflowModelsDialogVisible.value = true
+  }
+
+  function closePresetWorkflowModelsDialog() {
+    presetWorkflowModelsDialogVisible.value = false
   }
 
   function showPresetRequirementsDialog(data: PresetRequirementsData, confirmFunction: () => void) {
@@ -284,6 +294,10 @@ export const useDialogStore = defineStore('dialog', () => {
     warningDontShowAgainKey,
     showWarningDialog,
     closeWarningDialog,
+
+    presetWorkflowModelsDialogVisible,
+    showPresetWorkflowModelsDialog,
+    closePresetWorkflowModelsDialog,
 
     // Download dialog
     downloadDialogVisible,

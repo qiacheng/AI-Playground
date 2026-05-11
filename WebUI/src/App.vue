@@ -225,6 +225,9 @@
       :mode="promptStore.getCurrentMode()"
       @close="showSpecificSettings = false"
     />
+    <preset-workflow-models-dialog
+      v-show="dialogStore.presetWorkflowModelsDialogVisible"
+    ></preset-workflow-models-dialog>
     <download-dialog v-show="dialogStore.downloadDialogVisible"></download-dialog>
     <warning-dialog v-show="dialogStore.warningDialogVisible"></warning-dialog>
     <preset-requirements-dialog
@@ -299,6 +302,7 @@ import './assets/css/index.css'
 import { useGlobalSetup } from './assets/js/store/globalSetup'
 import { useProductMode } from './assets/js/store/productMode'
 import DownloadDialog from '@/components/DownloadDialog.vue'
+import PresetWorkflowModelsDialog from '@/components/PresetWorkflowModelsDialog.vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { useTheme } from './assets/js/store/theme.ts'
 import AddLLMDialog from '@/components/AddLLMDialog.vue'
