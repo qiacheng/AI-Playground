@@ -16,8 +16,9 @@ import {
 } from 'ai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { useTextInference } from './textInference'
+import { useBackendServices } from './backendServices'
 import { useConversations, HOME_AGENT_CHAT_PRESET_NAME } from './conversations'
-import { completeOrphanedToolParts } from './toolMessageSanitize'
+import { completeOrphanedToolParts, sanitizeBulkyToolOutputs } from './toolMessageSanitize'
 import { useErrors } from './errors'
 import { useActivities } from './activities'
 import { useConfirmations } from './confirmations'
@@ -86,6 +87,7 @@ export const useOpenAiCompatibleChat = defineStore(
   'openAiCompatibleChat',
   () => {
     const textInference = useTextInference()
+    const backendServices = useBackendServices()
     const conversations = useConversations()
     const errors = useErrors()
     const activities = useActivities()
@@ -247,6 +249,10 @@ export const useOpenAiCompatibleChat = defineStore(
         if (name === 'screenshotWebPage' && !textInference.modelSupportsVision) {
           continue
         }
+        if (name === 'synthesizeTextToSpeech') {
+          const qwenInfo = backendServices.info.find((s) => s.serviceName === 'qwen3-tts-backend')
+          if (!qwenInfo?.isSetUp) continue
+        }
         tools[name] = builtinTool
       }
       // The Home Agent self-inspection/configuration tools are only meaningful
@@ -381,7 +387,9 @@ export const useOpenAiCompatibleChat = defineStore(
       // converting: an assistant tool-call with no matching result would make
       // convertToModelMessages/streamText throw "Tool result is missing …" and
       // brick the thread. See toolMessageSanitize.ts.
-      let messages = await convertToModelMessages(completeOrphanedToolParts(m.messages))
+      let messages = await convertToModelMessages(
+        sanitizeBulkyToolOutputs(completeOrphanedToolParts(m.messages)),
+      )
       // [HA-DIAG] Temporary: gate perf logging to Home Agent turns. Declared here
       // (not at the streamText callbacks) so the earlier image-trim block can log.
       const haDiag = textInference.activePreset?.name === HOME_AGENT_CHAT_PRESET_NAME
@@ -447,6 +455,27 @@ export const useOpenAiCompatibleChat = defineStore(
                   type: 'text',
                   value: 'Object detections visualized on image successfully',
                 } as LanguageModelV2ToolResultOutput,
+              }
+            }
+            if (
+              part.type === 'tool-result' &&
+              part.toolName === 'synthesizeTextToSpeech' &&
+              part.output.type === 'json'
+            ) {
+              const value = part.output.value as {
+                ok?: boolean
+                message?: string
+                savedFilePath?: string
+              } | null
+              const text =
+                value?.ok === false
+                  ? (value.message ?? 'Speech synthesis failed.')
+                  : `${value?.message ?? 'Speech synthesized successfully.'}${
+                      value?.savedFilePath ? ` File: ${value.savedFilePath}` : ''
+                    }`
+              return {
+                ...part,
+                output: { type: 'text', value: text } as LanguageModelV2ToolResultOutput,
               }
             }
             return part
@@ -1024,8 +1053,13 @@ export const useOpenAiCompatibleChat = defineStore(
         }
       }
 
+      const sanitizedForStorage = sanitizeBulkyToolOutputs(outgoingMessages)
+      if (sanitizedForStorage !== outgoingMessages) {
+        chat.messages.splice(0, chat.messages.length, ...sanitizedForStorage)
+      }
+
       // 6. Persist conversation (sanitize base64 image parts to aipg-media)
-      conversations.updateConversation(outgoingMessages, targetKey)
+      conversations.updateConversation(chat.messages, targetKey)
 
       // 7. Clear inputs only on a clean turn, so failures/stops are retryable.
       if (clearInputs && !hadError) {

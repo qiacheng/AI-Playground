@@ -117,6 +117,7 @@ type LocalSettings = {
   demoModeResetInSeconds: number | null
   demoModePasscode?: string
   isHomeAgentEnabled: boolean
+  isQwen3TtsEnabled?: boolean
   languageOverride: string | null
   remoteRepository: string
   huggingfaceEndpoint: string
@@ -294,6 +295,13 @@ type electronAPI = {
   getDemoModeSettings(): Promise<DemoModeSettings>
   saveImage(url: string): void
   saveImageToMediaInput(dataUri: string): Promise<string>
+  saveGeneratedAudio(
+    audioBase64: string,
+    filename: string,
+  ): Promise<{ success: boolean; filePath?: string; error?: string }>
+  readLocalAudioAsDataUri(
+    filePath: string,
+  ): Promise<{ success: boolean; dataUri?: string; error?: string }>
   readAipgMediaAsBase64(
     url: string,
   ): Promise<{ success: true; data: string } | { success: false; error: string }>
@@ -819,6 +827,7 @@ type BackendServiceName =
   | 'llamacpp-backend'
   | 'openvino-backend'
   | 'home-agent-backend'
+  | 'qwen3-tts-backend'
 
 type InferenceDevice = {
   id: string

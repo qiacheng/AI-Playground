@@ -7,6 +7,7 @@ const FRIENDLY_LABELS: Record<string, string> = {
   listHomeAgentModels: 'List models',
   configureHomeAgent: 'Change settings',
   captureScreenshot: 'Capture screenshot',
+  synthesizeTextToSpeech: 'Synthesize speech',
   comfyUI: 'Generate media',
   comfyUiImageEdit: 'Edit image',
   visualizeObjectDetections: 'Visualize detections',
