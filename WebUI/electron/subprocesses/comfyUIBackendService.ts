@@ -1682,13 +1682,7 @@ except Exception as e:
       this.comfyUiVariant === 'xpu' &&
       this.usableXpuConfirmed !== true
     ) {
-      this.appLogger.warn(
-        'ComfyUI variant is xpu but no usable Intel GPU device has been confirmed by a torch.xpu probe; ' +
-          'falling back to CPU for this launch to avoid a "Torch not compiled with CUDA enabled" crash.',
-        this.name,
-        true,
-      )
-      this.comfyUiVariant = 'cpu'
+      await this.detectXpuDevicesWithTorch()
     }
 
     // Ensure non-XPU variants don't keep stale ipex_to_cuda injection from previous installs.
