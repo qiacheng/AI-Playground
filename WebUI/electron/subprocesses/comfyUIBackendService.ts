@@ -1755,24 +1755,6 @@ except Exception as e:
       userParameters = filtered
     }
 
-    // On Linux XPU (shared-memory Intel iGPUs that borrow up to tens of GB from
-    // system RAM), --lowvram's piecemeal model loading fragments the SYCL USM
-    // pool and triggers OOM on large single allocations (e.g. Flux attention).
-    // Run in normal VRAM mode with a small reserve instead.
-    if (process.platform === 'linux' && this.comfyUiVariant === 'xpu') {
-      const filtered: string[] = []
-      for (let i = 0; i < userParameters.length; i++) {
-        const arg = userParameters[i]
-        if (arg === '--lowvram') continue
-        if (arg === '--reserve-vram') {
-          i++ // also skip its value
-          continue
-        }
-        filtered.push(arg)
-      }
-      userParameters = [...filtered, '--reserve-vram', '2.0']
-    }
-
     const parameters = [
       'main.py',
       '--port',
