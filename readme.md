@@ -84,12 +84,21 @@ cd AI-Playground
      Behind a corporate proxy that intercepts `deb.nodesource.com`, prefix the
      `curl` with `--proxy "$http_proxy"` and ensure `https_proxy` is exported.
 
-2. Navigate to the `WebUI` directory and install all Node.js dependencies:
+2. Navigate to the `WebUI` directory and run the one-time setup:
 
 ```bash
 cd WebUI
-npm install
+npm run setup
 ```
+
+This installs the Node.js dependencies, fetches external resources (`uv`, 7-Zip
+and other tools — see [Fetch External Resources](#fetch-external-resources)
+below), provisions the Electron binary, and installs the git pre-commit hook
+(Ruff for the Python backends, ESLint + Prettier for the WebUI — see
+`.pre-commit-config.yaml`). The hook step is best effort: if `pre-commit` is
+unavailable it prints how to install it and continues. You can re-run just the
+hook install at any time with `npm run install-hooks`. (Plain `npm install`
+still works if you only want the Node.js dependencies.)
 
 ### Fetch External Resources
 
@@ -161,7 +170,8 @@ root) and a **`.deb`** package for a system-wide install via `apt`.
 
    Alternatively, install the **`.deb`** instead of running the AppImage. `apt`
    resolves the runtime dependencies declared in the package
-   (`libgtk-3-0`, `libnss3`, `libasound2`, `libdbus-1-3`, `pciutils`, `python3`):
+   (`libgtk-3-0`, `libnss3`, `libasound2`, `libdbus-1-3`, `pciutils`, `python3`,
+   `git`):
 
    ```bash
    cd build/electron
@@ -182,6 +192,19 @@ root) and a **`.deb`** package for a system-wide install via `apt`.
    ```bash
    sudo apt-get update
    sudo apt-get install -y python3 python3-venv libtbb12 libhwloc15 libgomp1 libnuma1 ocl-icd-libopencl1 libfuse2t64
+   ```
+
+5. ComfyUI Ubuntu build dependencies are checked during ComfyUI backend setup.
+
+   ComfyUI is cloned with `git` and some of its Python dependencies (e.g.
+   `insightface`) are compiled from source during install, which needs a C
+   compiler and the CPython headers. On a fresh Ubuntu these are missing, so
+   AI Playground prompts to install them automatically. To install them
+   manually:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y git build-essential python3-dev
    ```
 
 ### Behind a corporate / HTTP proxy

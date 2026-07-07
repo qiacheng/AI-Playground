@@ -114,8 +114,8 @@
         "to": "device-service/xpu-smi.exe"
       },
       {
-        "from": "../build/resources/xpum.dll",
-        "to": "device-service/xpum.dll"
+        "from": "../build/resources/xpum-2.dll",
+        "to": "device-service/xpum-2.dll"
       }
     ],
     "verifyUpdateCodeSignature": false,
@@ -133,7 +133,7 @@
     "allowElevation": true
   },
   "deb": {
-    "depends": ["libdbus-1-3", "libgtk-3-0", "libnss3", "libasound2", "pciutils", "python3"]
+    "depends": ["libdbus-1-3", "libgtk-3-0", "libnss3", "libasound2", "pciutils", "python3", "git"]
   },
   "linux": {
     "target": [
@@ -150,6 +150,8 @@
     "artifactName": "${productName}-${version}.${ext}",
     "category": "Utility",
     "synopsis": "AI inference desktop app for Intel GPUs",
+    "vendor": "Intel Corporation",
+    "maintainer": "Intel Corporation <webadmin@linux.intel.com>",
     "executableArgs": ["--no-sandbox"],
     "desktop": {
       "entry": {

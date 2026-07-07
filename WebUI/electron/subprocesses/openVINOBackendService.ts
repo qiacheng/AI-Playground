@@ -10,8 +10,8 @@ import { exec } from 'child_process'
 import { LocalSettings } from '../main.ts'
 import getPort, { portNumbers } from 'get-port'
 import { ensureManagedPython, installBackend, uvPipInstallToTarget } from './uvBasedBackends/uv.ts'
-import { binary, extract } from './tools.ts'
-import { resolveModels } from '../remoteUpdates.ts'
+import { binary, extract, restoreTreeWritePermissions } from './tools.ts'
+import { getBundledBackendVersionSync, resolveModels } from '../remoteUpdates.ts'
 import {
   getMissingPackages,
   hasAptGet,
@@ -49,6 +49,7 @@ export class OpenVINOBackendService implements ApiService {
   readonly ovmsExePath: string
   readonly pythonEnvDir: string
   readonly detectDevicesScript: string
+  readonly versionMarkerPath: string
 
   readonly zipPath: string
   devices: InferenceDevice[] = [{ id: 'AUTO', name: 'Auto select device', selected: true }]
@@ -76,6 +77,10 @@ export class OpenVINOBackendService implements ApiService {
   private currentImageModel: string | null = null
   private currentImageResolution: string | null = null
 
+  // OVMS --kv_cache_precision for the LLM (text_generation) server.
+  // '' means use OVMS's default; 'u4' enables INT4 KV cache compression.
+  private kvCachePrecision: string = ''
+
   // Store last startup error details for persistence
   private lastStartupErrorDetails: ErrorDetails | null = null
 
@@ -97,8 +102,12 @@ export class OpenVINOBackendService implements ApiService {
   // Logger
   readonly appLogger = appLoggerInstance
 
-  private version = '2026.2.1'
-  private releaseTag: string | undefined = undefined
+  // Build-time default sourced from the shipped backend-versions.json (single
+  // source of truth). The UI overrides these via updateSettings() with the
+  // resolved/overridden version before set_up() runs.
+  private version: string | undefined = getBundledBackendVersionSync('openvino-backend')?.version
+  private releaseTag: string | undefined =
+    getBundledBackendVersionSync('openvino-backend')?.releaseTag
   private readonly linuxRuntimePackages = [
     'python3',
     'python3-venv',
@@ -132,6 +141,10 @@ export class OpenVINOBackendService implements ApiService {
     this.zipPath = path.resolve(path.join(this.serviceDir, archiveName))
     this.pythonEnvDir = path.resolve(path.join(this.serviceDir, '.venv'))
     this.detectDevicesScript = path.resolve(path.join(this.serviceDir, 'detect_devices.py'))
+    // Records exactly which version/releaseTag was installed. Written at the end of
+    // set_up(), read by getInstalledVersion(). This is the only reliable source of
+    // the installed releaseTag (the `ovms --version` output does not report it).
+    this.versionMarkerPath = path.resolve(path.join(this.serviceDir, 'installed-version.json'))
 
     // Check if already set up
     this.isSetUp = this.serviceIsSetUp()
@@ -1207,28 +1220,72 @@ export class OpenVINOBackendService implements ApiService {
       this.version = settings.version
       this.appLogger.info(`applied new OpenVINO Model Server version ${this.version}`, this.name)
     }
+    if (typeof settings.ovmsKvCachePrecision === 'string') {
+      const next = settings.ovmsKvCachePrecision
+      if (next !== this.kvCachePrecision) {
+        this.kvCachePrecision = next
+        this.appLogger.info(
+          `applied new OVMS kv_cache_precision: '${this.kvCachePrecision || '(default)'}'`,
+          this.name,
+        )
+        // The precision is baked into the LLM server's launch args, so an already
+        // running chat server keeps the old value. Tear down the chat sub-servers
+        // (LLM + embedding) so the next inference reloads with the new precision.
+        if (this.ovmsLlmProcess) {
+          await this.stopChatServers()
+        }
+      }
+    }
+  }
+
+  /**
+   * Persist exactly which version/releaseTag was installed. Called at the end of
+   * set_up() where this.version/this.releaseTag hold the values that were just
+   * downloaded. This is the authoritative source for getInstalledVersion() — it
+   * also captures the releaseTag, which `ovms --version` cannot report.
+   */
+  private async writeVersionMarker(): Promise<void> {
+    try {
+      await filesystem.writeJson(this.versionMarkerPath, {
+        version: this.version,
+        ...(this.releaseTag && { releaseTag: this.releaseTag }),
+      })
+    } catch (e) {
+      this.appLogger.warn(`Failed to write OpenVINO version marker: ${e}`, this.name)
+    }
   }
 
   async getInstalledVersion(): Promise<{ version?: string; releaseTag?: string } | undefined> {
     if (!this.isSetUp) return undefined
+
+    // Prefer the marker written at install time: it is fast, reliable (no binary
+    // execution) and the only source that knows the installed releaseTag.
+    if (filesystem.existsSync(this.versionMarkerPath)) {
+      try {
+        const marker = (await filesystem.readJson(this.versionMarkerPath)) as {
+          version?: string
+          releaseTag?: string
+        }
+        if (marker && marker.version) {
+          return {
+            version: marker.version,
+            ...(marker.releaseTag && { releaseTag: marker.releaseTag }),
+          }
+        }
+      } catch (e) {
+        this.appLogger.warn(`Failed to read OpenVINO version marker: ${e}`, this.name)
+      }
+    }
+
+    // Fallback for installations that predate the marker: ask the binary itself.
+    // Must use buildOvmsEnv() (PATH/PYTHONHOME on Windows, LD_LIBRARY_PATH on
+    // Linux) so the executable can resolve its DLLs/shared objects — otherwise
+    // the call fails intermittently and the version never shows.
     try {
       const extraLibPaths = await this.resolveOvmsExtraLibPaths()
       const result = await execAsync(`"${this.ovmsExePath}" --version`, {
         timeout: 5000,
-        env: {
-          ...process.env,
-          // On Linux, OVMS shared libs (libtbb, libopenvino, ...) live in ovmsDir/lib
-          // and libpython3.12 comes from the managed CPython installation.
-          ...(process.platform !== 'win32' && {
-            LD_LIBRARY_PATH: [
-              path.join(this.ovmsDir, 'lib'),
-              ...extraLibPaths,
-              process.env.LD_LIBRARY_PATH ?? '',
-            ]
-              .filter(Boolean)
-              .join(':'),
-          }),
-        },
+        env: this.buildOvmsEnv(extraLibPaths),
       })
       // Parse output like "OpenVINO backend 2025.4.0.0rc3"
       const versionMatch = result.stdout.match(/OpenVINO backend\s+([\d.]+(?:rc\d+)?)/)
@@ -1262,6 +1319,12 @@ export class OpenVINOBackendService implements ApiService {
   }
 
   async *set_up(): AsyncIterable<SetupProgress> {
+    // Stop any running model servers first. On a reinstall/update they hold
+    // ovms.exe and its DLLs open, which makes removeSync() of the ovms directory
+    // fail with EPERM on Windows. Done before setStatus('installing') so the
+    // teardown's own status changes don't clobber the installing state.
+    await this.stopAllModelServers()
+
     this.setStatus('installing')
     this.appLogger.info('setting up service', this.name)
 
@@ -1364,6 +1427,7 @@ export class OpenVINOBackendService implements ApiService {
       }
 
       this.isSetUp = true
+      await this.writeVersionMarker()
       await this.updateCachedVersion()
       this.setStatus('notYetStarted')
 
@@ -1391,6 +1455,13 @@ export class OpenVINOBackendService implements ApiService {
   }
 
   private async downloadOvms(): Promise<void> {
+    // The version is normally applied via updateSettings() before set_up(); if it
+    // is still unset the shipped backend-versions.json could not be read.
+    if (!this.version) {
+      throw new Error(
+        'OpenVINO Model Server version is not set (failed to read backend-versions.json)',
+      )
+    }
     // Build an ordered list of candidate URLs to try, most-specific first.
     //
     // Windows – uses the OpenVINO toolkit storage (zip, no version in filename).
@@ -1509,13 +1580,86 @@ export class OpenVINOBackendService implements ApiService {
     return ['ubuntu24']
   }
 
+  /**
+   * Windows-only: forcibly kill every ovms.exe and its child tree, by image name.
+   *
+   * The tracked model-server processes are stopped via stopAllModelServers(), but
+   * other ovms.exe instances can still hold the install directory open — most
+   * notably the short-lived `ovms --version` probe (whose worker/python children
+   * leak because exec()'s timeout only signals the direct PID on Windows), or a
+   * process left over from a previous app run. Any one of them keeps a handle on
+   * the binary/DLLs (and ovms runs with cwd = the install dir), which makes the
+   * directory undeletable with EBUSY/EPERM. `taskkill /T /F` clears them all.
+   */
+  private async killStrayOvmsProcessesWindows(): Promise<void> {
+    if (process.platform !== 'win32') return
+    try {
+      await execAsync('taskkill /F /IM ovms.exe /T')
+      this.appLogger.info('Killed stray ovms.exe processes before extraction', this.name)
+    } catch (e) {
+      // Exits non-zero when no ovms.exe is running — expected and not fatal.
+      this.appLogger.info(`No stray ovms.exe to kill (or taskkill reported: ${e})`, this.name)
+    }
+  }
+
+  /**
+   * Remove a directory, retrying on transient failures. Even after the processes
+   * holding it have been killed, the OS can take a short while to release file
+   * handles on the ovms binary/DLLs (Windows EPERM/EBUSY), so the first removal
+   * may still fail. On Linux a read-only directory in the tree fails with EACCES;
+   * we restore write permissions before retrying. Retry a few times with a
+   * backoff, then surface a clear, actionable error.
+   */
+  private async removeDirWithRetry(dir: string, attempts = 5): Promise<void> {
+    // Pre-emptively restore write permissions on Linux/macOS so the very first
+    // removal of a read-only tree (e.g. a prior OVMS install) succeeds.
+    await restoreTreeWritePermissions(dir)
+
+    let lastError: unknown
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await filesystem.remove(dir)
+        return
+      } catch (e) {
+        lastError = e
+        const code = (e as NodeJS.ErrnoException)?.code
+        if (
+          (code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY' || code === 'EACCES') &&
+          attempt < attempts
+        ) {
+          this.appLogger.warn(
+            `Removal of ${dir} failed with ${code} (attempt ${attempt}/${attempts}), retrying...`,
+            this.name,
+          )
+          // EACCES means a directory in the tree lost its write bit; re-assert
+          // permissions before the next attempt.
+          if (code === 'EACCES') {
+            await restoreTreeWritePermissions(dir)
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          continue
+        }
+        break
+      }
+    }
+    throw new Error(
+      `Failed to remove existing OpenVINO directory ${dir} for reinstall. ` +
+        `Close any program holding files there (a running OpenVINO Model Server, ` +
+        `an antivirus scan, an IDE indexing the folder, or a terminal/Explorer ` +
+        `window inside it) and try again. Cause: ${lastError}`,
+    )
+  }
+
   private async extractOvms(): Promise<void> {
     this.appLogger.info(`Extracting OVMS to ${this.ovmsDir}`, this.name)
 
     // Delete existing ovms directory if it exists
     if (filesystem.existsSync(this.ovmsDir)) {
       this.appLogger.info(`Removing existing OVMS directory`, this.name)
-      filesystem.removeSync(this.ovmsDir)
+      // Kill any process still holding the binary/DLLs open first, otherwise the
+      // removal fails with EBUSY/EPERM on Windows.
+      await this.killStrayOvmsProcessesWindows()
+      await this.removeDirWithRetry(this.ovmsDir)
     }
 
     // Create ovms directory
@@ -1587,6 +1731,27 @@ export class OpenVINOBackendService implements ApiService {
     return 'running'
   }
 
+  /**
+   * Tear down every running OVMS model server. Each stop is isolated so one
+   * failure cannot leave the others running (and their files locked).
+   */
+  private async stopAllModelServers(): Promise<void> {
+    const stoppers: Array<[string, () => Promise<void>]> = [
+      ['llm', () => this.stopOvmsLlmServer()],
+      ['embedding', () => this.stopOvmsEmbeddingServer()],
+      ['transcription', () => this.stopOvmsTranscriptionServer()],
+      ['speech', () => this.stopOvmsSpeechServer()],
+      ['image', () => this.stopOvmsImageServer()],
+    ]
+    for (const [label, stopFn] of stoppers) {
+      try {
+        await stopFn()
+      } catch (e) {
+        this.appLogger.warn(`Failed to stop OVMS ${label} server: ${e}`, this.name)
+      }
+    }
+  }
+
   async stop(): Promise<BackendStatus> {
     this.appLogger.info(
       `Stopping backend ${this.name}. It was in state ${this.currentStatus}`,
@@ -1595,12 +1760,7 @@ export class OpenVINOBackendService implements ApiService {
     this.desiredStatus = 'stopped'
     this.setStatus('stopping')
 
-    // Stop all model servers
-    await this.stopOvmsLlmServer()
-    await this.stopOvmsEmbeddingServer()
-    await this.stopOvmsTranscriptionServer()
-    await this.stopOvmsSpeechServer()
-    await this.stopOvmsImageServer()
+    await this.stopAllModelServers()
 
     this.setStatus('stopped')
     return 'stopped'
@@ -1906,6 +2066,13 @@ export class OpenVINOBackendService implements ApiService {
         args.push('--max_prompt_len', maxPromptLen.toString())
       }
 
+      // INT4/INT8 KV cache compression (experimental) lowers GPU memory usage,
+      // especially for long contexts. Only pass the flag when explicitly enabled;
+      // an empty value leaves OVMS on its default precision.
+      if (this.kvCachePrecision) {
+        args.push('--kv_cache_precision', this.kvCachePrecision)
+      }
+
       this.appLogger.info(`OVMS launch args: ${args.join(' ')}`, this.name)
 
       const extraLibPaths = await this.resolveOvmsExtraLibPaths()
@@ -1972,32 +2139,56 @@ export class OpenVINOBackendService implements ApiService {
     }
   }
 
+  /**
+   * Terminate an OVMS server process and its entire child tree.
+   *
+   * OVMS spawns worker subprocesses (--rest_workers) and an embedded Python, and
+   * runs with cwd set to the ovms directory. On Windows ChildProcess.kill() only
+   * signals the direct PID, so the workers survive and keep handles on the ovms
+   * binary/DLLs — and the live CWD itself — which makes a subsequent reinstall
+   * fail to delete the directory (EPERM/EBUSY). `taskkill /T /F` tears down the
+   * whole tree; we then wait for the OS to reap it and release the handles.
+   */
+  private async terminateProcessTree(proc: ChildProcess, label: string): Promise<void> {
+    const waitForExit = (ms: number): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        if (proc.exitCode !== null || proc.signalCode !== null) {
+          resolve(true)
+          return
+        }
+        const timeout = setTimeout(() => resolve(false), ms)
+        proc.once('exit', () => {
+          clearTimeout(timeout)
+          resolve(true)
+        })
+      })
+
+    proc.kill('SIGTERM')
+    let exited = await waitForExit(2000)
+    if (exited) return
+
+    this.appLogger.warn(`Force killing OVMS ${label} process tree`, this.name)
+    if (process.platform === 'win32' && proc.pid !== undefined) {
+      try {
+        await execAsync(`taskkill /PID ${proc.pid} /T /F`)
+      } catch (e) {
+        // taskkill exits non-zero when the process is already gone — not fatal.
+        this.appLogger.warn(`taskkill for OVMS ${label} reported: ${e}`, this.name)
+      }
+    } else {
+      proc.kill('SIGKILL')
+    }
+
+    exited = await waitForExit(5000)
+    if (!exited) {
+      this.appLogger.warn(`OVMS ${label} not confirmed exited after force kill`, this.name)
+    }
+  }
+
   private async stopOvmsLlmServer(): Promise<void> {
     if (this.ovmsLlmProcess) {
       this.appLogger.info(`Stopping OVMS LLM server for model: ${this.currentModel}`, this.name)
-      this.ovmsLlmProcess.process.kill('SIGTERM')
-
-      // Wait a bit for graceful shutdown, then force kill if needed
-      await new Promise<void>((resolve) => {
-        const currentProcess = this.ovmsLlmProcess
-        const timeout = setTimeout(() => {
-          if (currentProcess) {
-            this.appLogger.warn(`Force killing OVMS LLM server process`, this.name)
-            currentProcess.process.kill('SIGKILL')
-          }
-          resolve()
-        }, 5000)
-
-        if (currentProcess) {
-          currentProcess.process.on('exit', () => {
-            clearTimeout(timeout)
-            resolve()
-          })
-        } else {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
+      await this.terminateProcessTree(this.ovmsLlmProcess.process, 'LLM server')
 
       this.ovmsLlmProcess = null
       this.currentModel = null
@@ -2102,29 +2293,7 @@ export class OpenVINOBackendService implements ApiService {
         `Stopping OVMS embedding server for model: ${this.currentEmbeddingModel}`,
         this.name,
       )
-      this.ovmsEmbeddingProcess.process.kill('SIGTERM')
-
-      // Wait a bit for graceful shutdown, then force kill if needed
-      await new Promise<void>((resolve) => {
-        const currentProcess = this.ovmsEmbeddingProcess
-        const timeout = setTimeout(() => {
-          if (currentProcess) {
-            this.appLogger.warn(`Force killing OVMS embedding server process`, this.name)
-            currentProcess.process.kill('SIGKILL')
-          }
-          resolve()
-        }, 5000)
-
-        if (currentProcess) {
-          currentProcess.process.on('exit', () => {
-            clearTimeout(timeout)
-            resolve()
-          })
-        } else {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
+      await this.terminateProcessTree(this.ovmsEmbeddingProcess.process, 'embedding server')
 
       this.ovmsEmbeddingProcess = null
       this.currentEmbeddingModel = null
@@ -2234,29 +2403,7 @@ export class OpenVINOBackendService implements ApiService {
         `Stopping OVMS transcription server for model: ${this.currentTranscriptionModel}`,
         this.name,
       )
-      this.ovmsTranscriptionProcess.process.kill('SIGTERM')
-
-      // Wait a bit for graceful shutdown, then force kill if needed
-      await new Promise<void>((resolve) => {
-        const currentProcess = this.ovmsTranscriptionProcess
-        const timeout = setTimeout(() => {
-          if (currentProcess) {
-            this.appLogger.warn(`Force killing OVMS transcription server process`, this.name)
-            currentProcess.process.kill('SIGKILL')
-          }
-          resolve()
-        }, 5000)
-
-        if (currentProcess) {
-          currentProcess.process.on('exit', () => {
-            clearTimeout(timeout)
-            resolve()
-          })
-        } else {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
+      await this.terminateProcessTree(this.ovmsTranscriptionProcess.process, 'transcription server')
 
       this.ovmsTranscriptionProcess = null
       this.currentTranscriptionModel = null
@@ -2372,29 +2519,7 @@ export class OpenVINOBackendService implements ApiService {
         `Stopping OVMS speech server for model: ${this.currentSpeechModel}`,
         this.name,
       )
-      this.ovmsSpeechProcess.process.kill('SIGTERM')
-
-      // Wait a bit for graceful shutdown, then force kill if needed
-      await new Promise<void>((resolve) => {
-        const currentProcess = this.ovmsSpeechProcess
-        const timeout = setTimeout(() => {
-          if (currentProcess) {
-            this.appLogger.warn(`Force killing OVMS speech server process`, this.name)
-            currentProcess.process.kill('SIGKILL')
-          }
-          resolve()
-        }, 5000)
-
-        if (currentProcess) {
-          currentProcess.process.on('exit', () => {
-            clearTimeout(timeout)
-            resolve()
-          })
-        } else {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
+      await this.terminateProcessTree(this.ovmsSpeechProcess.process, 'speech server')
 
       this.ovmsSpeechProcess = null
       this.currentSpeechModel = null
@@ -2507,28 +2632,7 @@ export class OpenVINOBackendService implements ApiService {
         `Stopping OVMS image server for model: ${this.currentImageModel}`,
         this.name,
       )
-      this.ovmsImageProcess.process.kill('SIGTERM')
-
-      await new Promise<void>((resolve) => {
-        const currentProcess = this.ovmsImageProcess
-        const timeout = setTimeout(() => {
-          if (currentProcess) {
-            this.appLogger.warn(`Force killing OVMS image server process`, this.name)
-            currentProcess.process.kill('SIGKILL')
-          }
-          resolve()
-        }, 5000)
-
-        if (currentProcess) {
-          currentProcess.process.on('exit', () => {
-            clearTimeout(timeout)
-            resolve()
-          })
-        } else {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
+      await this.terminateProcessTree(this.ovmsImageProcess.process, 'image server')
 
       this.ovmsImageProcess = null
       this.currentImageModel = null
@@ -2689,7 +2793,7 @@ export class OpenVINOBackendService implements ApiService {
   async uninstall(): Promise<void> {
     await this.stop()
     this.appLogger.info(`removing OpenVINO Model Server directory`, this.name)
-    await filesystem.remove(this.ovmsDir)
+    await this.removeDirWithRetry(this.ovmsDir)
     this.appLogger.info(`removed OpenVINO Model Server directory`, this.name)
     this.setStatus('notInstalled')
     this.isSetUp = false
