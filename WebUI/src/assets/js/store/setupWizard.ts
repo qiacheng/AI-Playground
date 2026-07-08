@@ -883,7 +883,7 @@ function mapServiceNameToDisplayName(serviceName: string) {
     case 'home-agent-backend':
       return 'Home Agent'
     case 'qwen3-tts-backend':
-      return 'Qwen3 TTS'
+      return 'Qwen3-TTS'
     default:
       return serviceName
   }
