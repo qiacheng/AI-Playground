@@ -60,6 +60,10 @@ import {
 } from './subprocesses/comfyUIBackendService'
 import { AiBackendService } from './subprocesses/aiBackendService'
 import { HomeAgentBackendService } from './subprocesses/homeAgentBackendService'
+import {
+  getLocalWebServerStatus,
+  stopLocalWebChannelServer,
+} from './localWebChannelServer.ts'
 import { LLAMACPP_DEFAULT_PARAMETERS } from './subprocesses/llamaCppBackendService'
 import { filterPartnerPresets, updateIntelPresets } from './subprocesses/updateIntelPresets.ts'
 import { getGitHubRepoUrl, resolveBackendVersion, resolveModels } from './remoteUpdates.ts'
@@ -895,6 +899,8 @@ app.on('second-instance', (_event, _commandLine, _workingDirectory) => {
 
 async function initServiceRegistry(win: BrowserWindow, settings: LocalSettings) {
   serviceRegistry = await aiplaygroundApiServiceRegistry(win, settings)
+  ipcMain.handle('homeAgent:localWeb:getStatus', () => getLocalWebServerStatus())
+  ipcMain.handle('homeAgent:localWeb:stop', () => stopLocalWebChannelServer())
   const homeAgent = serviceRegistry.getService('home-agent-backend')
   if (homeAgent instanceof HomeAgentBackendService) {
     homeAgent.registerIpcHandlers()

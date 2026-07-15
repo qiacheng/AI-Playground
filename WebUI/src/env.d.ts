@@ -478,6 +478,15 @@ type electronAPI = {
       filename: string,
       base64: string,
     ): Promise<{ success: boolean; filepath?: string; error?: string }>
+    localWeb: {
+      getStatus(): Promise<{
+        running: boolean
+        port: number
+        allowLan: boolean
+        urls: string[]
+      }>
+      stop(): Promise<void>
+    }
     channel: {
       saveConfig(
         kind: string,

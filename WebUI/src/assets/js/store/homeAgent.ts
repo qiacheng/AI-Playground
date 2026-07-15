@@ -53,6 +53,7 @@ import { isAppError, extractMessage, createAppError, createCancellation } from '
 import { createTelegramAdapter } from './channels/telegramAdapter'
 import { createSlackAdapter } from './channels/slackAdapter'
 import { createMockAdapter, mockChannelBus, type MockInboundMessage } from './channels/mockAdapter'
+import { createLocalWebAdapter } from './channels/localWebAdapter'
 
 // ── Channel registry ────────────────────────────────────────────────────────
 // Kinds we manage in this store. Adding a third one means appending to this
@@ -63,7 +64,9 @@ import { createMockAdapter, mockChannelBus, type MockInboundMessage } from './ch
 // when debug tools are enabled (i.e. `npm run dev`).
 const MOCK_ENABLED = !!window.envVars?.debugToolsEnabled
 const KINDS = (
-  MOCK_ENABLED ? ['telegram', 'slack', 'mock'] : ['telegram', 'slack']
+  MOCK_ENABLED
+    ? (['telegram', 'slack', 'local-web', 'mock'] as const)
+    : (['telegram', 'slack', 'local-web'] as const)
 ) as readonly ChannelKind[]
 
 /**
@@ -168,6 +171,7 @@ export const useHomeAgent = defineStore(
       slack: emptyPrefs(),
       discord: emptyPrefs(),
       mock: emptyPrefs(),
+      'local-web': emptyPrefs(),
     })
 
     // Runtime-only per-channel state (secret config + derived `active`). Never
@@ -177,6 +181,7 @@ export const useHomeAgent = defineStore(
       slack: emptyRuntimeState('slack'),
       discord: emptyRuntimeState('discord'),
       mock: emptyRuntimeState('mock'),
+      'local-web': emptyRuntimeState('local-web'),
     })
 
     // Per-channel message queues — `channels[kind].active` flips the polling
@@ -186,6 +191,7 @@ export const useHomeAgent = defineStore(
       slack: [] as ChannelQueueItem[],
       discord: [] as ChannelQueueItem[],
       mock: [] as ChannelQueueItem[],
+      'local-web': [] as ChannelQueueItem[],
     } satisfies Record<ChannelKind, ChannelQueueItem[]>
 
     // Adapter instances — one per kind. Created at setup time; their methods
@@ -196,6 +202,7 @@ export const useHomeAgent = defineStore(
       slack: createSlackAdapter(),
       discord: null, // populated when Discord lands
       mock: MOCK_ENABLED ? createMockAdapter() : null,
+      'local-web': createLocalWebAdapter(),
     }
 
     /**
@@ -346,6 +353,13 @@ export const useHomeAgent = defineStore(
           channels.mock.active = MOCK_ENABLED && masterEnabled.value
           continue
         }
+        if (kind === 'local-web') {
+          channels['local-web'].active =
+            masterEnabled.value &&
+            channelPrefs['local-web'].enabled &&
+            channelPrefs['local-web'].verified
+          continue
+        }
         channels[kind].active =
           isAvailable.value &&
           masterEnabled.value &&
@@ -368,9 +382,32 @@ export const useHomeAgent = defineStore(
     // starts (or restarts if creds changed). One watcher per kind so each
     // can decide its own "credentials ready" predicate without coupling.
     for (const kind of KINDS) {
-      // The mock channel has no backend bot, so it skips credential injection;
-      // every other kind injects once its required secrets are present.
-      if (kind !== 'mock') {
+      if (kind === 'local-web') {
+        watch(
+          [() => channels['local-web'].config, () => channels['local-web'].active],
+          ([config, active]) => {
+            const c = config as Record<string, string>
+            if (!c.password) return
+            const payload: Record<string, string | undefined> = {
+              password: c.password,
+              port: c.port ?? '8765',
+              allowLan: c.allowLan ?? 'true',
+            }
+            if (active) {
+              window.electronAPI.homeAgent.channel
+                .inject('local-web', payload)
+                .catch((e: unknown) =>
+                  console.error('homeAgent: inject(local-web) failed:', e),
+                )
+            } else {
+              window.electronAPI.homeAgent.localWeb
+                .stop()
+                .catch((e: unknown) => console.error('homeAgent: localWeb.stop failed:', e))
+            }
+          },
+          { flush: 'post', immediate: true, deep: true },
+        )
+      } else if (kind !== 'mock') {
         watch(
           [isAvailable, () => channels[kind].config, () => channelPrefs[kind].identity],
           ([avail, config, identity]) => {

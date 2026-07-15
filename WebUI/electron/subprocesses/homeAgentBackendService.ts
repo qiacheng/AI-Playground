@@ -6,13 +6,20 @@ import { app, BrowserWindow, ipcMain, net, safeStorage } from 'electron'
 import { LocalSettings } from '../main.ts'
 import { GitService, LongLivedPythonApiService, createEnhancedErrorDetails } from './service.ts'
 import { aipgBaseDir, checkBackend, installBackend } from './uvBasedBackends/uv.ts'
+import {
+  deliverLocalWebOutbound,
+  drainLocalWebInbound,
+  localWebPasswordFromConfig,
+  startLocalWebChannelServer,
+  stopLocalWebChannelServer,
+} from '../localWebChannelServer.ts'
 
 // ── Channel-agnostic types ────────────────────────────────────────────────
 // Mirrored from WebUI/src/assets/js/store/channels/types.ts. Keeping a local
 // copy avoids the renderer-side store importing electron types and vice
 // versa; the contract is small enough that drift is easy to spot.
 
-type ChannelKind = 'telegram' | 'slack' | 'discord'
+type ChannelKind = 'telegram' | 'slack' | 'discord' | 'local-web'
 
 type EncryptedField = { type: string; data: number[] }
 
@@ -87,11 +94,13 @@ const SECRET_FIELDS: Record<ChannelKind, string[]> = {
   telegram: ['token'],
   slack: ['botToken', 'appToken'],
   discord: ['botToken'],
+  'local-web': ['password'],
 }
 const PUBLIC_FIELDS: Record<ChannelKind, string[]> = {
   telegram: ['chatId'],
   slack: ['userId'],
   discord: ['userId'],
+  'local-web': ['port', 'allowLan', 'sessionId'],
 }
 
 export class HomeAgentBackendService extends LongLivedPythonApiService {
@@ -401,6 +410,9 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
       for (const [k, v] of Object.entries(data.publicFields ?? {})) {
         out[k] = v
       }
+      if (kind === 'local-web' && !out.password && out.accessToken) {
+        out.password = out.accessToken
+      }
       return out
     } catch {
       return null
@@ -426,6 +438,15 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
     kind: ChannelKind,
     config: Record<string, string | undefined>,
   ): Promise<{ status: string; error?: string }> {
+    if (kind === 'local-web') {
+      const port = parseInt(config.port ?? '8765', 10)
+      const password = localWebPasswordFromConfig(config)
+      if (!password) return { status: 'error', error: 'Missing password' }
+      const allowLan = config.allowLan !== 'false'
+      const started = await startLocalWebChannelServer({ port, password, allowLan })
+      if (!started.ok) return { status: 'error', error: started.error }
+      return { status: 'ok' }
+    }
     if (this.currentStatus !== 'running') return { status: 'not_running' }
     try {
       const res = await net.fetch(`${this.baseUrl}/channel/${kind}/config`, {
@@ -453,6 +474,7 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
   }
 
   async channelGetIdentity(kind: ChannelKind): Promise<{ identity: string } | { error: string }> {
+    if (kind === 'local-web') return { identity: 'local' }
     if (this.currentStatus !== 'running') return { error: 'service_not_running' }
     try {
       const res = await net.fetch(`${this.baseUrl}/channel/${kind}/identity`, {
@@ -477,6 +499,15 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
       callback?: string
     }>
   > {
+    if (kind === 'local-web') {
+      return drainLocalWebInbound().map((m) => ({
+        text: m.text,
+        chat_id: m.chat_id,
+        channel: m.channel,
+        ts: m.ts,
+        callback: m.callback,
+      }))
+    }
     if (this.currentStatus !== 'running') return []
     try {
       const res = await net.fetch(`${this.baseUrl}/channel/${kind}/poll`, {
@@ -533,6 +564,10 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
     messageId?: number
     error?: string
   }> {
+    if (kind === 'local-web') {
+      deliverLocalWebOutbound(action, payload)
+      return { success: true, ts: String(Date.now()), channel: 'local-web' }
+    }
     if (this.currentStatus !== 'running') return { success: false, error: 'Home Agent not running' }
     try {
       const url = `${this.baseUrl}/channel/${kind}/send/${action}`
@@ -650,7 +685,26 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
   async channelTest(kind: ChannelKind): Promise<{ success: boolean; error?: string }> {
     if (kind === 'telegram') return this.testTelegram()
     if (kind === 'slack') return this.testSlack()
+    if (kind === 'local-web') return this.testLocalWeb()
     return { success: false, error: `verification not implemented for ${kind}` }
+  }
+
+  async testLocalWeb(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const config = this.loadChannelConfig('local-web')
+      if (!config) return { success: false, error: 'No local web config saved' }
+      const port = parseInt(config.port ?? '8765', 10)
+      const password = localWebPasswordFromConfig(config)
+      if (!password) return { success: false, error: 'Missing password' }
+      const allowLan = config.allowLan !== 'false'
+      const started = await startLocalWebChannelServer({ port, password, allowLan })
+      if (!started.ok) return { success: false, error: started.error }
+      const res = await net.fetch(`http://127.0.0.1:${port}/api/health`)
+      if (!res.ok) return { success: false, error: `Health check failed (${res.status})` }
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
   }
 
   // ── Identity detection ──────────────────────────────────────────────────
@@ -718,6 +772,7 @@ export class HomeAgentBackendService extends LongLivedPythonApiService {
     kind: ChannelKind,
     config: Record<string, string | undefined>,
   ): Promise<{ identity: string } | { error: string }> {
+    if (kind === 'local-web') return { identity: 'local' }
     // Try the backend's cached identity first regardless of channel — saves
     // a roundtrip when the bot has already seen a message.
     const fromBackend = await this.channelGetIdentity(kind)

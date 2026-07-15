@@ -254,7 +254,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Persist an inbound document (base64) to disk for RAG ingestion.
     saveDocument: (filename: string, base64: string) =>
       ipcRenderer.invoke('saveHomeAgentDocument', filename, base64),
-    // Channel-agnostic dispatcher. Every method is keyed by ChannelKind
+    localWeb: {
+      getStatus: () => ipcRenderer.invoke('homeAgent:localWeb:getStatus'),
+      stop: () => ipcRenderer.invoke('homeAgent:localWeb:stop'),
+    },
+    // Channel-agnostic dispatcher.
     // (`'telegram'` | `'slack'` | `'discord'`) so adding a new platform
     // requires zero edits here — only a new entry in the renderer-side
     // channel registry and a Python channel module.
