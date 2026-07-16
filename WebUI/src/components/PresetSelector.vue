@@ -1,11 +1,12 @@
 <template>
   <div class="flex flex-col gap-6">
-    <Card class="bg-muted p-3">
+    <Card id="preset-selector" class="bg-muted p-3" data-aipg-help="preset-selector">
       <div class="grid grid-cols-3 gap-3">
         <div
           v-for="preset in filteredPresets"
           :key="preset.name"
           class="relative rounded-lg overflow-hidden transition-all duration-200 border-2 aspect-square shadow-md"
+          :data-aipg-preset-name="preset.name"
           :class="[
             selectedPresetName === preset.name
               ? 'border-primary ring-2 ring-primary'
@@ -152,10 +153,12 @@ const availableVariants = computed(() => {
 })
 
 const variantSelectorOptions = computed<VariantOption[]>(() => {
+  const presetName = selectedPreset.value?.name ?? ''
   return availableVariants.value.map((variant, index) => ({
     id: `variant-${index}`,
     name: variant.displayName ?? variant.name,
     value: variant.name,
+    presetName,
   }))
 })
 

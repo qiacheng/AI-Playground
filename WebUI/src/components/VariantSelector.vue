@@ -8,6 +8,8 @@ export interface VariantOption {
   name: string
   value: string
   icon?: string
+  /** Parent preset name — used by contextual help mode */
+  presetName?: string
 }
 
 interface Props {
@@ -52,6 +54,8 @@ const gridClass = computed(() => {
       <RadioGroupItem :id="option.id" :value="option.value" class="peer sr-only" />
       <Label
         :for="option.id"
+        :data-aipg-preset-name="option.presetName ?? undefined"
+        :data-aipg-variant-name="option.presetName ? option.name : undefined"
         class="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary [&:has([data-state=checked])]:border-primary"
       >
         {{ option.name }}
