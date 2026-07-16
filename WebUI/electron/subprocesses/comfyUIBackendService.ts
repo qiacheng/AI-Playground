@@ -28,6 +28,7 @@ import {
   type ComfyUiDepsMarker,
 } from './comfyUiRevision.ts'
 import { ProcessError } from './osProcessHelper.ts'
+import { killStaleProcessesByCommandLine } from './processLifecycle.ts'
 import { getMediaDir } from '../util.ts'
 import {
   clearLevelZeroRuntimeCache,
@@ -1646,6 +1647,17 @@ except Exception as e:
     process: ChildProcess
     didProcessExitEarlyTracker: Promise<boolean>
   }> {
+    // Kill any ComfyUI left over from a previous session (e.g. after a hard
+    // crash / force-quit that skipped our clean shutdown). We match on this
+    // backend's python binary path, which is unique to ComfyUI's env dir. The
+    // port is picked fresh each launch, so an orphan sits on a *different* port
+    // and would otherwise run beside the new instance → GPU out-of-memory.
+    await killStaleProcessesByCommandLine(this.getPythonBinaryPath(), {
+      name: this.name,
+      label: 'ComfyUI',
+      appLogger: this.appLogger,
+    })
+
     // Clear any stale SQLite WAL/SHM sidecars from a crashed run that would
     // otherwise block ComfyUI from opening its database.
     this.cleanupStaleComfyUiDbLocks()
@@ -1682,13 +1694,7 @@ except Exception as e:
       this.comfyUiVariant === 'xpu' &&
       this.usableXpuConfirmed !== true
     ) {
-      this.appLogger.warn(
-        'ComfyUI variant is xpu but no usable Intel GPU device has been confirmed by a torch.xpu probe; ' +
-          'falling back to CPU for this launch to avoid a "Torch not compiled with CUDA enabled" crash.',
-        this.name,
-        true,
-      )
-      this.comfyUiVariant = 'cpu'
+      await this.detectXpuDevicesWithTorch()
     }
 
     // Ensure non-XPU variants don't keep stale ipex_to_cuda injection from previous installs.
@@ -1753,24 +1759,6 @@ except Exception as e:
         filtered.push(arg)
       }
       userParameters = filtered
-    }
-
-    // On Linux XPU (shared-memory Intel iGPUs that borrow up to tens of GB from
-    // system RAM), --lowvram's piecemeal model loading fragments the SYCL USM
-    // pool and triggers OOM on large single allocations (e.g. Flux attention).
-    // Run in normal VRAM mode with a small reserve instead.
-    if (process.platform === 'linux' && this.comfyUiVariant === 'xpu') {
-      const filtered: string[] = []
-      for (let i = 0; i < userParameters.length; i++) {
-        const arg = userParameters[i]
-        if (arg === '--lowvram') continue
-        if (arg === '--reserve-vram') {
-          i++ // also skip its value
-          continue
-        }
-        filtered.push(arg)
-      }
-      userParameters = [...filtered, '--reserve-vram', '2.0']
     }
 
     const parameters = [
