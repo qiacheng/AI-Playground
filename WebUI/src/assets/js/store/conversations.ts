@@ -37,6 +37,10 @@ export type ConversationThreadMeta = {
   kind?: ThreadKind
   /** Set after auto context compact so we do not re-summarize every turn. */
   contextCompactedForContextSize?: number
+  /** Summarized older turns — used at inference time only; UI keeps full history. */
+  inferenceContextSummary?: string
+  /** First message id still sent to the model after summarizing older turns. */
+  inferenceContextTailFromMessageId?: string
 }
 
 export type CreateConversationOptions = {

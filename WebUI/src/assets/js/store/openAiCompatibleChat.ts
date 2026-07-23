@@ -32,17 +32,25 @@ import { dynamicTool, jsonSchema } from '@ai-sdk/provider-utils'
 import { imageUrlToDataUri } from '@/lib/utils'
 import { getHomeAgentAuthToken, invalidateHomeAgentAuthToken } from '@/lib/loopbackAuth'
 import {
-  appendAutoCompactSystemInstruction,
   buildCompactedMessageList,
   buildContextSummaryPrompt,
   clampSummaryToHistoryBudget,
   compactedHistoryFitsBudget,
   estimatePendingUserTokens,
   flattenUiMessagesForSummary,
+  formatInferenceContextSummaryBlock,
+  INFERENCE_LATEST_TURN_PRIORITY,
+  inferenceContextCheckInputs,
   isContextOverflowErrorMessage,
+  messagesFitHardContextLimit,
   needsContextCompaction,
+  resolveUiMessagesForInference,
+  rollbackMessagesBeforeTurnRetry,
+  shrinkUiMessagesForSuccessfulTurn,
   splitForTargetHistoryShare,
-  stripUsageFromMessages,
+  TOOL_TURN_CONTEXT_RESERVE_TOKENS,
+  trimModelMessagesToContextBudget,
+  truncateToolOutputsInMessages,
 } from '@/assets/js/chatContextCompact'
 import * as toast from '@/assets/js/toast.ts'
 
@@ -127,6 +135,35 @@ export const useOpenAiCompatibleChat = defineStore(
     // normally. Cleared at the start of each turn and consumed via
     // `consumeTurnError`.
     const turnErrors = new Map<string, AppError>()
+
+    // Keeps chat-scoped inference activity alive from pre-send compaction through
+    // customFetch so the activity indicator and prompt busy state do not flicker.
+    const turnPrepActivityByConversation = new Map<string, string>()
+
+    function beginTurnPrepActivity(conversationKey: string): string {
+      endTurnPrepActivity(conversationKey)
+      const id = activities.begin({
+        category: 'inference',
+        label: i18nState.COM_ACTIVITY_PROCESSING_PROMPT,
+        scope: { kind: 'chat', conversationKey },
+      })
+      turnPrepActivityByConversation.set(conversationKey, id)
+      return id
+    }
+
+    function endTurnPrepActivity(conversationKey: string): void {
+      const id = turnPrepActivityByConversation.get(conversationKey)
+      if (!id) return
+      turnPrepActivityByConversation.delete(conversationKey)
+      activities.end(id)
+    }
+
+    function adoptTurnPrepActivity(conversationKey: string): string | null {
+      const id = turnPrepActivityByConversation.get(conversationKey)
+      if (!id) return null
+      turnPrepActivityByConversation.delete(conversationKey)
+      return id
+    }
 
     // Per-conversation AI SDK chat instances. Declared up here (before the
     // `processing` computed and its safety-net watch below) because Vue evaluates
@@ -416,6 +453,7 @@ export const useOpenAiCompatibleChat = defineStore(
       preserveFromIndex: number,
       pendingTokens = 0,
       force = false,
+      turnPrepActivityId?: string,
     ): Promise<boolean> {
       if (!textInference.autoContextCompactEnabled) return false
 
@@ -423,8 +461,8 @@ export const useOpenAiCompatibleChat = defineStore(
       if (!chat) return false
 
       const preserveEnd = Math.min(Math.max(preserveFromIndex, 0), chat.messages.length)
-      const head = completeOrphanedToolParts(
-        chat.messages.slice(0, preserveEnd) as AipgUiMessage[],
+      const head = truncateToolOutputsInMessages(
+        completeOrphanedToolParts(chat.messages.slice(0, preserveEnd) as AipgUiMessage[]),
       )
       const tail = chat.messages.slice(preserveEnd)
       if (head.length === 0) return false
@@ -433,16 +471,21 @@ export const useOpenAiCompatibleChat = defineStore(
       const maxOutputTokens = resolveMaxOutputTokens()
       const allForCheck = [...head, ...tail]
       const measured = getLastMeasuredPromptTokens(chat.messages)
+      const threadMeta = conversations.getThreadMeta(conversationKey)
+      const hasStoredInferenceSummary = !!threadMeta?.inferenceContextSummary
+      const { uiMessages: budgetMessages, systemPrompt: budgetSystemPrompt } =
+        inferenceContextCheckInputs(allForCheck, systemPrompt, threadMeta)
       if (
         !force &&
         !needsContextCompaction(
-          allForCheck,
-          systemPrompt,
+          budgetMessages,
+          budgetSystemPrompt,
           contextSize,
           maxOutputTokens,
           pendingTokens,
           measured,
           false,
+          hasStoredInferenceSummary,
         )
       ) {
         return false
@@ -465,20 +508,30 @@ export const useOpenAiCompatibleChat = defineStore(
         return text.trim()
       }
 
+      const summarizeWithActivity = async (transcript: string, concise: boolean) => {
+        if (turnPrepActivityId) {
+          activities.update(turnPrepActivityId, {
+            label: i18nState.COM_ACTIVITY_COMPACTING_CONTEXT,
+          })
+          return runSummary(transcript, concise)
+        }
+        return activities.track(
+          {
+            category: 'inference',
+            label: i18nState.COM_ACTIVITY_COMPACTING_CONTEXT,
+            scope: activityScope,
+          },
+          () => runSummary(transcript, concise),
+        )
+      }
+
       let summary = ''
       suppressThinkingInRequest.value = true
       try {
         const transcript = flattenUiMessagesForSummary(split.prefix)
         if (!transcript.trim()) return false
 
-        summary = await activities.track(
-          {
-            category: 'inference',
-            label: i18nState.COM_ACTIVITY_COMPACTING_CONTEXT,
-            scope: activityScope,
-          },
-          () => runSummary(transcript, false),
-        )
+        summary = await summarizeWithActivity(transcript, false)
       } catch (error) {
         errors.report(error, {
           category: 'inference',
@@ -499,13 +552,13 @@ export const useOpenAiCompatibleChat = defineStore(
       let compactedHead = buildCompactedMessageList(
         summary,
         split.suffix,
-        globalThis.crypto.randomUUID(),
-      )
+        'inference-probe',
+      ) as AipgUiMessage[]
 
       if (!compactedHistoryFitsBudget(compactedHead, contextSize, systemPrompt, pendingTokens)) {
         suppressThinkingInRequest.value = true
         try {
-          const shorter = await runSummary(summary, true)
+          const shorter = await summarizeWithActivity(summary, true)
           if (shorter) {
             const shorterClamped = clampSummaryToHistoryBudget(
               shorter,
@@ -513,50 +566,218 @@ export const useOpenAiCompatibleChat = defineStore(
               systemPrompt,
               split.suffix,
             )
+            summary = shorterClamped
             compactedHead = buildCompactedMessageList(
               shorterClamped,
               split.suffix,
-              globalThis.crypto.randomUUID(),
-            )
+              'inference-probe',
+            ) as AipgUiMessage[]
           }
         } finally {
           suppressThinkingInRequest.value = false
         }
       }
 
-      const nextMessages = stripUsageFromMessages([...compactedHead, ...tail])
-      chat.messages.splice(0, chat.messages.length, ...nextMessages)
-      conversations.updateConversation(nextMessages, conversationKey)
+      if (
+        !messagesFitHardContextLimit(
+          [...compactedHead, ...tail],
+          systemPrompt,
+          contextSize,
+          maxOutputTokens,
+          pendingTokens,
+        )
+      ) {
+        const lastUserInHead = [...split.suffix].reverse().find((m) => m.role === 'user')
+        if (lastUserInHead) {
+          compactedHead = buildCompactedMessageList(
+            summary,
+            [lastUserInHead],
+            'inference-probe',
+          ) as AipgUiMessage[]
+        }
+      }
 
+      const tailStartId = split.suffix[0]?.id
       const existingMeta = conversations.getThreadMeta(conversationKey)
-      if (existingMeta?.presetName) {
-        conversations.setThreadMeta(conversationKey, {
-          ...existingMeta,
-          contextCompactedForContextSize: contextSize,
+      conversations.setThreadMeta(conversationKey, {
+        presetName: existingMeta?.presetName ?? textInference.activePreset?.name ?? 'Chat',
+        variant: existingMeta?.variant ?? textInference.activeVariant,
+        kind: existingMeta?.kind,
+        inferenceContextSummary: summary,
+        inferenceContextTailFromMessageId: tailStartId,
+        contextCompactedForContextSize: contextSize,
+      })
+
+      if (turnPrepActivityId) {
+        activities.update(turnPrepActivityId, {
+          label: i18nState.COM_ACTIVITY_PROCESSING_PROMPT,
         })
       }
 
       return true
     }
 
+    function buildInferencePromptAndMessages(
+      conversationKey: string,
+      rawUiMessages: AipgUiMessage[],
+      baseSystemPrompt: string,
+    ): { uiMessages: AipgUiMessage[]; systemPrompt: string } {
+      const threadMeta = conversations.getThreadMeta(conversationKey)
+      let systemPrompt = baseSystemPrompt
+      if (threadMeta?.inferenceContextSummary) {
+        systemPrompt += formatInferenceContextSummaryBlock(threadMeta.inferenceContextSummary)
+      }
+      systemPrompt += INFERENCE_LATEST_TURN_PRIORITY
+      const legacyUi = appendLegacyCompactSystemIfNeeded(systemPrompt, rawUiMessages)
+      systemPrompt = legacyUi.systemPrompt
+      let uiMessages = resolveUiMessagesForInference(rawUiMessages, threadMeta)
+      uiMessages = shrinkUiMessagesForSuccessfulTurn(
+        truncateToolOutputsInMessages(uiMessages),
+        systemPrompt,
+        effectiveContextSizeForBudget(),
+        resolveMaxOutputTokens(),
+        0,
+      ).messages
+      return { uiMessages, systemPrompt }
+    }
+
+    function appendLegacyCompactSystemIfNeeded(
+      systemPrompt: string,
+      messages: AipgUiMessage[],
+    ): { systemPrompt: string } {
+      const hasLegacy = messages.some((m) =>
+        (m.parts ?? []).some(
+          (p) =>
+            p.type === 'text' &&
+            typeof (p as { text?: string }).text === 'string' &&
+            (p as { text: string }).text.includes('[Earlier conversation — auto-compacted]'),
+        ),
+      )
+      if (!hasLegacy || systemPrompt.includes('[Earlier conversation — auto-compacted]')) {
+        return { systemPrompt }
+      }
+      return {
+        systemPrompt:
+          systemPrompt +
+          '\n\nWhen a user message begins with "[Earlier conversation — auto-compacted]", treat it as a summary of earlier turns.\n',
+      }
+    }
+
+    function prioritizeCurrentTurnContext(
+      conversationKey: string,
+      systemPrompt: string,
+      pendingTokens: number,
+      opts?: { notifyUser?: boolean },
+    ): boolean {
+      const chat = chats[conversationKey]
+      if (!chat) return false
+      const contextSize = effectiveContextSizeForBudget()
+      const maxOutputTokens = resolveMaxOutputTokens()
+      const threadMeta = conversations.getThreadMeta(conversationKey)
+      const baseUi = resolveUiMessagesForInference(
+        chat.messages as AipgUiMessage[],
+        threadMeta,
+      )
+      let systemForCheck = systemPrompt
+      if (threadMeta?.inferenceContextSummary) {
+        systemForCheck += formatInferenceContextSummaryBlock(threadMeta.inferenceContextSummary)
+      }
+      systemForCheck += INFERENCE_LATEST_TURN_PRIORITY
+      const outcome = shrinkUiMessagesForSuccessfulTurn(
+        truncateToolOutputsInMessages(baseUi),
+        systemForCheck,
+        contextSize,
+        maxOutputTokens,
+        pendingTokens,
+      )
+      if (
+        opts?.notifyUser &&
+        outcome.aggressiveForget &&
+        outcome.changed &&
+        conversationKey === conversations.activeKey
+      ) {
+        toast.show(i18nState.COM_TOAST_CONTEXT_TRIMMED_FOR_REQUEST)
+        return true
+      }
+      return outcome.aggressiveForget && outcome.changed
+    }
+
     async function ensureConversationFitsContext(
       conversationKey: string,
       systemPrompt: string,
-      opts: { preserveFromIndex?: number; pendingTokens?: number; force?: boolean },
+      opts: {
+        preserveFromIndex?: number
+        pendingTokens?: number
+        /** Includes tool-loop headroom; used only for hard fit, not proactive compact. */
+        hardFitPendingTokens?: number
+        force?: boolean
+        notifyUser?: boolean
+        turnPrepActivityId?: string
+      },
     ): Promise<void> {
-      if (!textInference.autoContextCompactEnabled) return
-
       const chat = chats[conversationKey]
       if (!chat) return
 
-      const preserveFromIndex = opts.preserveFromIndex ?? chat.messages.length
-      await compactConversationToTargetHistoryShare(
+      const contextSize = effectiveContextSizeForBudget()
+      const maxOutputTokens = resolveMaxOutputTokens()
+      const pendingTokens = opts.pendingTokens ?? 0
+      const hardFitPending = opts.hardFitPendingTokens ?? pendingTokens
+      const threadMeta = conversations.getThreadMeta(conversationKey)
+      let didSummarize = false
+
+      if (textInference.autoContextCompactEnabled) {
+        let preserveFromIndex = opts.preserveFromIndex ?? chat.messages.length
+        let force = !!opts.force
+
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const meta = conversations.getThreadMeta(conversationKey)
+          const { uiMessages: budgetMessages, systemPrompt: budgetSystemPrompt } =
+            inferenceContextCheckInputs(chat.messages as AipgUiMessage[], systemPrompt, meta)
+          if (
+            messagesFitHardContextLimit(
+              budgetMessages,
+              budgetSystemPrompt,
+              contextSize,
+              maxOutputTokens,
+              hardFitPending,
+            )
+          ) {
+            break
+          }
+
+          const didCompact = await compactConversationToTargetHistoryShare(
+            conversationKey,
+            systemPrompt,
+            preserveFromIndex,
+            pendingTokens,
+            force,
+            opts.turnPrepActivityId,
+          )
+          force = true
+
+          if (!didCompact) {
+            break
+          }
+          didSummarize = true
+          preserveFromIndex = chat.messages.length
+        }
+      }
+
+      const aggressiveTrim = prioritizeCurrentTurnContext(
         conversationKey,
         systemPrompt,
-        preserveFromIndex,
-        opts.pendingTokens ?? 0,
-        !!opts.force,
+        pendingTokens,
+        { notifyUser: opts.notifyUser },
       )
+
+      if (
+        opts.notifyUser &&
+        didSummarize &&
+        !aggressiveTrim &&
+        conversationKey === conversations.activeKey
+      ) {
+        toast.show(i18nState.COM_TOAST_CONTEXT_COMPACTED)
+      }
     }
 
     async function retryAfterContextOverflow(
@@ -571,20 +792,24 @@ export const useOpenAiCompatibleChat = defineStore(
       const chat = chats[conversationKey]
       if (!chat) return
 
-      const last = chat.messages.at(-1)
-      if (last?.role === 'assistant') {
-        chat.messages.pop()
-      } else if (last?.role === 'user') {
-        chat.messages.pop()
-      }
+      const rolledBack = rollbackMessagesBeforeTurnRetry(chat.messages as AipgUiMessage[])
+      const healed = completeOrphanedToolParts(rolledBack)
+      chat.messages.splice(0, chat.messages.length, ...healed)
       conversations.updateConversation(chat.messages, conversationKey)
 
-      await ensureConversationFitsContext(conversationKey, systemPrompt, {
-        preserveFromIndex: chat.messages.length,
-        force: true,
-      })
+      const turnPrepId = beginTurnPrepActivity(conversationKey)
+      try {
+        await ensureConversationFitsContext(conversationKey, systemPrompt, {
+          preserveFromIndex: chat.messages.length,
+          force: true,
+          notifyUser: conversationKey === conversations.activeKey,
+          turnPrepActivityId: turnPrepId,
+        })
 
-      await chat.sendMessage(sendPayload)
+        await chat.sendMessage(sendPayload)
+      } finally {
+        endTurnPrepActivity(conversationKey)
+      }
     }
 
     async function resolveSystemPromptForInference(
@@ -678,18 +903,23 @@ export const useOpenAiCompatibleChat = defineStore(
         () => resolveMcpInstructions(),
       )
       const compactConversationKey = requestConversationKey ?? conversations.activeKey
-      const uiMessageSource =
-        chats[compactConversationKey]?.messages ?? (m.messages as AipgUiMessage[])
-      const systemPromptToUse = appendAutoCompactSystemInstruction(
-        `${baseSystemPrompt}${mcpInstructions}`,
-        uiMessageSource as AipgUiMessage[],
-      )
+      const chatForMessages = chats[compactConversationKey]
+      const rawUiMessages = (chatForMessages?.messages ??
+        (m.messages as AipgUiMessage[])) as AipgUiMessage[]
+      const { uiMessages: uiForInference, systemPrompt: systemPromptToUse } =
+        buildInferencePromptAndMessages(
+          compactConversationKey,
+          rawUiMessages,
+          `${baseSystemPrompt}${mcpInstructions}`,
+        )
+      const inferenceContextSize = effectiveContextSizeForBudget()
+      const inferenceMaxOutput = resolveMaxOutputTokens()
       // Self-heal orphaned tool calls (interrupted/stopped turns, HMR) before
       // converting: an assistant tool-call with no matching result would make
       // convertToModelMessages/streamText throw "Tool result is missing …" and
       // brick the thread. See toolMessageSanitize.ts.
       let messages = await convertToModelMessages(
-        completeOrphanedToolParts(uiMessageSource as AipgUiMessage[]),
+        completeOrphanedToolParts(uiForInference),
       )
       // [HA-DIAG] Temporary: gate perf logging to Home Agent turns. Declared here
       // (not at the streamText callbacks) so the earlier image-trim block can log.
@@ -881,6 +1111,14 @@ export const useOpenAiCompatibleChat = defineStore(
       )
       const hasTools = Object.keys(availableTools).length > 0
 
+      messages = trimModelMessagesToContextBudget(
+        messages as { role: string; content?: unknown }[],
+        systemPromptToUse,
+        inferenceContextSize,
+        inferenceMaxOutput,
+        { toolLoop: hasTools },
+      ) as typeof messages
+
       // Surface the silent inference waits as an activity: before the first token the
       // backend is prefilling the prompt/context ("Processing prompt…"); after a tool
       // runs the model incorporates its output before continuing ("Processing
@@ -891,13 +1129,20 @@ export const useOpenAiCompatibleChat = defineStore(
       let sawToolResult = false
       const ensureInferenceActivity = () => {
         if (!inferenceActivityId) {
-          inferenceActivityId = activities.begin({
-            category: 'inference',
-            label: sawToolResult
-              ? i18nState.COM_ACTIVITY_PROCESSING_RESULTS
-              : i18nState.COM_ACTIVITY_PROCESSING_PROMPT,
-            scope: activityScope,
-          })
+          const adopted = adoptTurnPrepActivity(activityScope.conversationKey)
+          const label = sawToolResult
+            ? i18nState.COM_ACTIVITY_PROCESSING_RESULTS
+            : i18nState.COM_ACTIVITY_PROCESSING_PROMPT
+          if (adopted) {
+            inferenceActivityId = adopted
+            activities.update(inferenceActivityId, { label })
+          } else {
+            inferenceActivityId = activities.begin({
+              category: 'inference',
+              label,
+              scope: activityScope,
+            })
+          }
         }
       }
       const clearInferenceActivity = () => {
@@ -914,6 +1159,7 @@ export const useOpenAiCompatibleChat = defineStore(
       // content. (`haDiag` is declared just after convertToModelMessages above.)
       const diagTurnStart = Date.now()
       let diagStepIdx = 0
+      let lastStepInputTokens = 0
       if (haDiag) {
         const toolNames = Object.keys(availableTools)
         console.log(
@@ -928,9 +1174,25 @@ export const useOpenAiCompatibleChat = defineStore(
         messages,
         abortSignal: options.signal,
         system: systemPromptToUse,
-        maxOutputTokens: resolveMaxOutputTokens(),
+        maxOutputTokens: inferenceMaxOutput,
         temperature: textInference.temperature,
         includeRawChunks: true,
+        prepareStep: ({ messages: stepMessages, stepNumber }) => {
+          if (stepNumber === 0 && !hasTools) return undefined
+          const trimmed = trimModelMessagesToContextBudget(
+            stepMessages as { role: string; content?: unknown }[],
+            systemPromptToUse,
+            inferenceContextSize,
+            inferenceMaxOutput,
+            {
+              toolStep: stepNumber > 0,
+              toolLoop: hasTools,
+              measuredPromptTokens: lastStepInputTokens > 0 ? lastStepInputTokens : undefined,
+            },
+          )
+          if (JSON.stringify(trimmed) === JSON.stringify(stepMessages)) return undefined
+          return { messages: trimmed as typeof stepMessages }
+        },
         // Surfaced to tool execute() so tools (e.g. configureHomeAgent) know
         // which conversation/channel they are running in.
         experimental_context: {
@@ -1060,6 +1322,9 @@ export const useOpenAiCompatibleChat = defineStore(
           }
         },
         onStepFinish: (step) => {
+          if (step.usage?.inputTokens && step.usage.inputTokens > 0) {
+            lastStepInputTokens = step.usage.inputTokens
+          }
           if (haDiag) {
             diagStepIdx++
             const calls = step.toolCalls.map((c) => c.toolName).join(',') || 'none'
@@ -1321,11 +1586,11 @@ export const useOpenAiCompatibleChat = defineStore(
             ? fileInput.value
             : undefined
       const pendingTokens = estimatePendingUserTokens(question, effectiveFiles)
-      await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
-        preserveFromIndex: chat.messages.length,
-        pendingTokens,
-      })
-
+      const toolReserve =
+        textInference.modelSupportsToolCalling && textInference.aipgToolsEnabled
+          ? TOOL_TURN_CONTEXT_RESERVE_TOKENS
+          : 0
+      const turnPrepId = beginTurnPrepActivity(targetKey)
       if (!sideChannel) {
         messageInput.value = question
       }
@@ -1338,57 +1603,69 @@ export const useOpenAiCompatibleChat = defineStore(
         },
       }
       try {
-        await chat.sendMessage(sendPayload)
-      } finally {
-        temporarySystemPrompts[targetKey] = null
-      }
+        await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
+          preserveFromIndex: chat.messages.length,
+          pendingTokens,
+          hardFitPendingTokens: pendingTokens + toolReserve,
+          notifyUser: !sideChannel,
+          turnPrepActivityId: turnPrepId,
+        })
 
-      let hadError = !!chat.error && !manuallyStopped.value
-      if (
-        hadError &&
-        textInference.autoContextCompactEnabled &&
-        chat.error &&
-        isContextOverflowErrorMessage(extractMessage(chat.error))
-      ) {
         try {
-          await retryAfterContextOverflow(targetKey, systemPromptForCompact, sendPayload)
-          hadError = !!chat.error && !manuallyStopped.value
-        } catch (retryError) {
-          throw errors.report(retryError, {
-            category: 'inference',
-            code: 'inference/context-compact-retry-failed',
-            userMessage: `Could not recover from context overflow: ${extractMessage(retryError)}`,
-            surface: sideChannel ? 'silent' : 'toast',
-            context: { conversationKey: targetKey },
-          })
+          await chat.sendMessage(sendPayload)
+        } finally {
+          temporarySystemPrompts[targetKey] = null
         }
-      }
 
-      if (!hadError) {
-        await retryReasoningOnlyTurnIfNeeded(targetKey)
-      }
-
-      // The Chat onError hook records stream failures. A failed turn should keep
-      // the user's prompt/attachments for retry instead of clearing them.
-      hadError = !!chat.error && !manuallyStopped.value
-
-      const outgoingMessages = chat.messages
-
-      // 5. Store RAG source in message metadata
-      if (ragContext.ragSourceText) {
-        const latestMessage = outgoingMessages[outgoingMessages.length - 1]
-        if (latestMessage && latestMessage.role === 'assistant' && latestMessage.metadata) {
-          latestMessage.metadata.ragSource = ragContext.ragSourceText
+        let hadError = !!chat.error && !manuallyStopped.value
+        if (
+          hadError &&
+          textInference.autoContextCompactEnabled &&
+          chat.error &&
+          isContextOverflowErrorMessage(extractMessage(chat.error))
+        ) {
+          try {
+            await retryAfterContextOverflow(targetKey, systemPromptForCompact, sendPayload)
+            hadError = !!chat.error && !manuallyStopped.value
+          } catch (retryError) {
+            throw errors.report(retryError, {
+              category: 'inference',
+              code: 'inference/context-compact-retry-failed',
+              userMessage: `Could not recover from context overflow: ${extractMessage(retryError)}`,
+              surface: sideChannel ? 'silent' : 'toast',
+              context: { conversationKey: targetKey },
+            })
+          }
         }
-      }
 
-      // 6. Persist conversation (sanitize base64 image parts to aipg-media)
-      conversations.updateConversation(outgoingMessages, targetKey)
+        if (!hadError) {
+          await retryReasoningOnlyTurnIfNeeded(targetKey)
+        }
 
-      // 7. Clear inputs only on a clean turn, so failures/stops are retryable.
-      if (clearInputs && !hadError) {
-        messageInput.value = ''
-        fileInput.value = []
+        // The Chat onError hook records stream failures. A failed turn should keep
+        // the user's prompt/attachments for retry instead of clearing them.
+        hadError = !!chat.error && !manuallyStopped.value
+
+        const outgoingMessages = chat.messages
+
+        // 5. Store RAG source in message metadata
+        if (ragContext.ragSourceText) {
+          const latestMessage = outgoingMessages[outgoingMessages.length - 1]
+          if (latestMessage && latestMessage.role === 'assistant' && latestMessage.metadata) {
+            latestMessage.metadata.ragSource = ragContext.ragSourceText
+          }
+        }
+
+        // 6. Persist conversation (sanitize base64 image parts to aipg-media)
+        conversations.updateConversation(outgoingMessages, targetKey)
+
+        // 7. Clear inputs only on a clean turn, so failures/stops are retryable.
+        if (clearInputs && !hadError) {
+          messageInput.value = ''
+          fileInput.value = []
+        }
+      } finally {
+        endTurnPrepActivity(targetKey)
       }
     }
 
@@ -1440,24 +1717,31 @@ export const useOpenAiCompatibleChat = defineStore(
 
       const preserveFromIndex = targetIdx > 0 ? targetIdx - 1 : 0
       const systemPromptForCompact = await resolveSystemPromptForInference(ragContext.systemPrompt)
-      await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
-        preserveFromIndex,
-      })
-
+      const turnPrepId = beginTurnPrepActivity(targetKey)
       try {
-        await chat.regenerate({ messageId })
-      } finally {
-        temporarySystemPrompts[targetKey] = null
-      }
+        await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
+          preserveFromIndex,
+          notifyUser: true,
+          turnPrepActivityId: turnPrepId,
+        })
 
-      if (ragContext.ragSourceText) {
-        const latestMessage = messages.value?.[messages.value.length - 1]
-        if (latestMessage && latestMessage.role === 'assistant' && latestMessage.metadata) {
-          latestMessage.metadata.ragSource = ragContext.ragSourceText
+        try {
+          await chat.regenerate({ messageId })
+        } finally {
+          temporarySystemPrompts[targetKey] = null
         }
-      }
 
-      conversations.updateConversation(messages.value, targetKey)
+        if (ragContext.ragSourceText) {
+          const latestMessage = messages.value?.[messages.value.length - 1]
+          if (latestMessage && latestMessage.role === 'assistant' && latestMessage.metadata) {
+            latestMessage.metadata.ragSource = ragContext.ragSourceText
+          }
+        }
+
+        conversations.updateConversation(messages.value, targetKey)
+      } finally {
+        endTurnPrepActivity(targetKey)
+      }
     }
 
     async function removeMessage(messageId: string) {

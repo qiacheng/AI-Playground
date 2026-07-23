@@ -99,8 +99,24 @@
             class="rounded-sm text-foreground text-center h-7 w-20 leading-7 p-0 bg-transparent border border-border"
           />
         </div>
-        <div class="grid grid-cols-[120px_1fr] items-center gap-4">
-          <Label class="whitespace-nowrap">{{ languages.ANSWER_AUTO_CONTEXT_COMPACT }}</Label>
+        <div
+          class="grid grid-cols-[120px_auto] items-center gap-x-4 gap-y-3"
+          role="group"
+          aria-label="Chat toggles"
+        >
+          <div class="flex items-center gap-1 min-w-0 self-center">
+            <Label class="leading-snug">{{ languages.ANSWER_AUTO_CONTEXT_COMPACT }}</Label>
+            <TooltipProvider :delay-duration="200">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <span class="svg-icon i-info w-4 h-4 shrink-0 opacity-50 cursor-help" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-[320px]">
+                  {{ languages.ANSWER_AUTO_CONTEXT_COMPACT_HINT }}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
           <Checkbox
             id="auto-context-compact"
             :model-value="textInference.autoContextCompactEnabled"
@@ -109,41 +125,28 @@
                 (textInference.autoContextCompactEnabled = !textInference.autoContextCompactEnabled)
             "
           />
-        </div>
-        <p class="text-xs text-muted-foreground ml-[120px] pl-4">
-          {{ languages.ANSWER_AUTO_CONTEXT_COMPACT_HINT }}
-        </p>
-        <div class="grid grid-cols-[120px_1fr] items-center gap-4">
           <Label class="whitespace-nowrap">{{ languages.ANSWER_METRICS }}</Label>
           <Checkbox
             id="metrics"
             :model-value="textInference.metricsEnabled"
             @click="() => (textInference.metricsEnabled = !textInference.metricsEnabled)"
           />
-        </div>
-        <!-- Thinking toggle - only shown for models whose template supports enable_thinking -->
-        <div
-          v-if="textInference.modelSupportsThinkingToggle"
-          class="grid grid-cols-[120px_1fr] items-center gap-4"
-        >
-          <Label class="whitespace-nowrap">Thinking</Label>
-          <Checkbox
-            id="thinking"
-            :model-value="textInference.thinkingEnabled"
-            @click="() => (textInference.thinkingEnabled = !textInference.thinkingEnabled)"
-          />
-        </div>
-        <!-- Built-in Tools toggle - only shown when preset has showTools enabled -->
-        <div
-          v-if="showTools && textInference.modelSupportsToolCalling"
-          class="grid grid-cols-[120px_1fr] items-center gap-4"
-        >
-          <Label class="whitespace-nowrap">Built-in tools:</Label>
-          <Checkbox
-            id="tools"
-            :model-value="textInference.aipgToolsEnabled"
-            @click="() => (textInference.aipgToolsEnabled = !textInference.aipgToolsEnabled)"
-          />
+          <template v-if="textInference.modelSupportsThinkingToggle">
+            <Label class="whitespace-nowrap">Thinking</Label>
+            <Checkbox
+              id="thinking"
+              :model-value="textInference.thinkingEnabled"
+              @click="() => (textInference.thinkingEnabled = !textInference.thinkingEnabled)"
+            />
+          </template>
+          <template v-if="showTools && textInference.modelSupportsToolCalling">
+            <Label class="whitespace-nowrap">Built-in tools:</Label>
+            <Checkbox
+              id="tools"
+              :model-value="textInference.aipgToolsEnabled"
+              @click="() => (textInference.aipgToolsEnabled = !textInference.aipgToolsEnabled)"
+            />
+          </template>
         </div>
 
         <div
@@ -231,6 +234,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 import {
   backendToService,

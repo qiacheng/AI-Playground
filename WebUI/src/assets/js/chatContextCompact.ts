@@ -5,14 +5,22 @@ import type { FileUIPart } from 'ai'
 export const TOKEN_ESTIMATE_SAFETY = 1.35
 
 const CONTEXT_SLACK = 128
+/** Safety margin — backend token counts often exceed our heuristics. */
+const CONTEXT_SEND_MARGIN = 0.82
 /** Fraction of context size left for new turns after a one-shot compact (history capped at the remainder). */
 export const AVAILABLE_CONTEXT_SHARE = 0.7
 /** Max share of context size used by message history after compacting (1 − available). */
 export const TARGET_HISTORY_SHARE = 1 - AVAILABLE_CONTEXT_SHARE
-/** Compact when estimated history exceeds this share; after compact, skip until crossed again. */
-export const COMPACT_TRIGGER_SHARE = 0.5
+/** Compact when estimated send payload exceeds this share of the prompt budget (not raw context size). */
+export const COMPACT_TRIGGER_SHARE = 0.85
 
 const COMPACT_SUMMARY_MARKER = '[Earlier conversation — auto-compacted]'
+
+/** Extra prompt budget reserved before send when tool calling may add several steps. */
+export const TOOL_TURN_CONTEXT_RESERVE_TOKENS = 2048
+
+/** Cap persisted tool output size so compaction and retries can recover from large results. */
+export const MAX_PERSISTED_TOOL_OUTPUT_CHARS = 1500
 
 /** Max share of the context window for the full prompt after a one-shot compact (system + history). */
 export const POST_COMPACT_MAX_PROMPT_SHARE = TARGET_HISTORY_SHARE
@@ -37,9 +45,18 @@ export function targetHistoryTokenBudget(contextSize: number): number {
 
 export const AUTO_COMPACT_SYSTEM_INSTRUCTION =
   '\n\nWhen a user message begins with "[Earlier conversation — auto-compacted]", it summarizes ' +
-  'earlier turns in this same chat. Treat facts in that summary (including the user\'s name and ' +
-  'preferences they shared) as established context. Answer from the summary directly; do not claim ' +
-  'you lack access to earlier conversation when the summary covers it.\n'
+  'earlier turns in this same chat. Treat facts in that summary as established context. Answer from ' +
+  'the summary directly.\n'
+
+/** Appended to the system prompt when an inference-only summary is active. */
+export function formatInferenceContextSummaryBlock(summary: string): string {
+  return `\n\nEarlier conversation summary (for continuity; the chat UI may show more history than this):\n${summary.trim()}\n`
+}
+
+export const INFERENCE_LATEST_TURN_PRIORITY =
+  '\n\nTreat the user\'s most recent message as their current intent. Short replies such as thanks, ' +
+  '"nice job", or ok are about the immediately preceding assistant reply—respond to that tone. Do not ' +
+  'resume earlier research tasks or call tools unless the latest message clearly requests it.\n'
 
 export function appendAutoCompactSystemInstruction(
   systemPrompt: string,
@@ -48,6 +65,41 @@ export function appendAutoCompactSystemInstruction(
   if (!hasAutoCompactSummaryMessage(messages)) return systemPrompt
   if (systemPrompt.includes(COMPACT_SUMMARY_MARKER)) return systemPrompt
   return `${systemPrompt}${AUTO_COMPACT_SYSTEM_INSTRUCTION}`
+}
+
+export type InferenceContextMeta = {
+  inferenceContextSummary?: string
+  inferenceContextTailFromMessageId?: string
+}
+
+/** Message list sent to the model (UI history unchanged). */
+export function resolveUiMessagesForInference(
+  messages: AipgUiMessage[],
+  meta: InferenceContextMeta | undefined,
+): AipgUiMessage[] {
+  if (!meta?.inferenceContextSummary || !meta.inferenceContextTailFromMessageId) {
+    return messages
+  }
+  const idx = messages.findIndex((m) => m.id === meta.inferenceContextTailFromMessageId)
+  if (idx < 0) return messages
+  return messages.slice(idx)
+}
+
+/** Messages + system text used for compact/skip checks (matches inference, not full UI scrollback). */
+export function inferenceContextCheckInputs(
+  messages: AipgUiMessage[],
+  baseSystemPrompt: string,
+  meta?: InferenceContextMeta,
+): { uiMessages: AipgUiMessage[]; systemPrompt: string } {
+  let systemPrompt = baseSystemPrompt
+  if (meta?.inferenceContextSummary) {
+    systemPrompt += formatInferenceContextSummaryBlock(meta.inferenceContextSummary)
+  }
+  systemPrompt += INFERENCE_LATEST_TURN_PRIORITY
+  return {
+    uiMessages: resolveUiMessagesForInference(messages, meta),
+    systemPrompt,
+  }
 }
 
 export function estimatedHistoryTokens(messages: AipgUiMessage[], pendingTokens = 0): number {
@@ -68,11 +120,11 @@ export function historyExceedsCompactTrigger(
   messages: AipgUiMessage[],
   contextSize: number,
   pendingTokens = 0,
+  maxOutputTokens = 1024,
 ): boolean {
-  return (
-    estimatedHistoryTokens(messages, pendingTokens) >
-    Math.floor(contextSize * COMPACT_TRIGGER_SHARE)
-  )
+  const maxPrompt = maxPromptTokensForContext(contextSize, maxOutputTokens)
+  const threshold = Math.floor(maxPrompt * COMPACT_TRIGGER_SHARE)
+  return estimatedHistoryTokens(messages, pendingTokens) > threshold
 }
 
 export function buildContextSummaryPrompt(transcript: string, concise = false): string {
@@ -110,10 +162,18 @@ export function shouldSkipFurtherCompaction(
   contextSize: number,
   pendingTokens: number,
   force: boolean,
+  hasStoredInferenceSummary = false,
+  maxOutputTokens = 1024,
 ): boolean {
   if (force) return false
-  if (!hasAutoCompactSummaryMessage(messages)) return false
-  return !historyExceedsCompactTrigger(messages, contextSize, pendingTokens)
+  const hasLegacyCompactMarker = hasAutoCompactSummaryMessage(messages)
+  if (!hasStoredInferenceSummary && !hasLegacyCompactMarker) return false
+  return !historyExceedsCompactTrigger(
+    messages,
+    contextSize,
+    pendingTokens,
+    maxOutputTokens,
+  )
 }
 
 export function clampSummaryToHistoryBudget(
@@ -143,6 +203,7 @@ type UiPart = {
   state?: string
   input?: unknown
   output?: unknown
+  errorText?: string
 }
 
 /** Flatten UI messages into a transcript suitable for summarization. */
@@ -159,6 +220,9 @@ export function flattenUiMessagesForSummary(messages: AipgUiMessage[]): string {
           if (p.type === 'tool-invocation') {
             const name = p.toolName ?? 'tool'
             return `(called ${name})`
+          }
+          if (p.type.startsWith('tool-') || p.type === 'dynamic-tool') {
+            return formatToolPartForSummary(p)
           }
           if (p.type === 'file') return '(attachment)'
           return ''
@@ -194,6 +258,362 @@ export function estimateUiMessagesTokens(messages: AipgUiMessage[]): number {
   return total
 }
 
+function clipTextForContext(text: string, maxChars: number): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= maxChars) return trimmed
+  return `${trimmed.slice(0, maxChars).trimEnd()}… [truncated for context]`
+}
+
+function toolPartOutputAsText(part: UiPart): string {
+  const raw = part.errorText ?? part.output
+  if (raw == null) return ''
+  if (typeof raw === 'string') return raw
+  try {
+    return JSON.stringify(raw)
+  } catch {
+    return String(raw)
+  }
+}
+
+function formatToolPartForSummary(part: UiPart): string {
+  const name = part.toolName ?? (part.type.replace(/^tool-/, '') || 'tool')
+  const outText = toolPartOutputAsText(part)
+  if (outText) {
+    return `(tool ${name}: ${clipTextForContext(outText, 400)})`
+  }
+  return `(called ${name})`
+}
+
+function truncateToolPart(part: UiPart, maxChars: number): UiPart {
+  if (!part.type.startsWith('tool-') && part.type !== 'dynamic-tool') return part
+  const outText = toolPartOutputAsText(part)
+  if (!outText || outText.length <= maxChars) return part
+  const clipped = clipTextForContext(outText, maxChars)
+  const output = part.output
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    const structured = output as Record<string, unknown>
+    if (structured.type === 'text' && typeof structured.value === 'string') {
+      return { ...part, output: { ...structured, value: clipped } }
+    }
+    if (structured.type === 'json') {
+      return {
+        ...part,
+        output: { type: 'text', value: clipped },
+      }
+    }
+    return { ...part, output: { type: 'text', value: clipped } }
+  }
+  if (typeof output === 'string') {
+    return { ...part, output: clipped }
+  }
+  return { ...part, output: { type: 'text', value: clipped } }
+}
+
+/** Shrink large tool results in persisted history (does not drop call/result pairs). */
+export function truncateToolOutputsInMessages(
+  messages: AipgUiMessage[],
+  maxOutputChars = MAX_PERSISTED_TOOL_OUTPUT_CHARS,
+): AipgUiMessage[] {
+  let changed = false
+  const next = messages.map((message) => {
+    if (!message.parts?.length) return message
+    let messageChanged = false
+    const parts = (message.parts as UiPart[]).map((part) => {
+      const truncated = truncateToolPart(part, maxOutputChars)
+      if (truncated !== part) messageChanged = true
+      return truncated
+    })
+    if (!messageChanged) return message
+    changed = true
+    return { ...message, parts }
+  })
+  return changed ? next : messages
+}
+
+/**
+ * Progressive forgetting so the current user turn can run under the context limit.
+ * Older detail may be dropped; failing the request is worse UX than losing memory.
+ */
+export type ContextShrinkOutcome = {
+  messages: AipgUiMessage[]
+  /** History beyond light tool truncation was dropped to fit the current turn. */
+  aggressiveForget: boolean
+  changed: boolean
+}
+
+function uiMessagesStructurallyChanged(
+  before: AipgUiMessage[],
+  after: AipgUiMessage[],
+): boolean {
+  if (before.length !== after.length) return true
+  return before.some((m, i) => m.id !== after[i]?.id)
+}
+
+export function shrinkUiMessagesForSuccessfulTurn(
+  messages: AipgUiMessage[],
+  systemPrompt: string,
+  contextSize: number,
+  maxOutputTokens: number,
+  pendingTokens = 0,
+): ContextShrinkOutcome {
+  const fits = (candidate: AipgUiMessage[]) =>
+    messagesFitHardContextLimit(
+      candidate,
+      systemPrompt,
+      contextSize,
+      maxOutputTokens,
+      pendingTokens,
+    )
+
+  const forgetLevels: Array<(m: AipgUiMessage[]) => AipgUiMessage[]> = [
+    (m) => truncateToolOutputsInMessages(stripReasoningFromMessages(m), MAX_PERSISTED_TOOL_OUTPUT_CHARS),
+    (m) => truncateToolOutputsInMessages(stripReasoningFromMessages(m), 400),
+    (m) => keepCompactSummaryAndFromLastUser(m),
+    (m) => keepCompactSummaryAndLastUserOnly(m),
+    (m) => keepLastUserMessageOnly(m),
+  ]
+
+  for (let level = 0; level < forgetLevels.length; level++) {
+    const candidate = forgetLevels[level](messages)
+    if (fits(candidate)) {
+      return {
+        messages: candidate,
+        aggressiveForget: level >= 2,
+        changed: uiMessagesStructurallyChanged(messages, candidate),
+      }
+    }
+  }
+
+  const fallback = keepLastUserMessageOnly(messages)
+  return {
+    messages: fallback,
+    aggressiveForget: true,
+    changed: uiMessagesStructurallyChanged(messages, fallback),
+  }
+}
+
+export function emergencyShrinkUiMessagesForContext(
+  messages: AipgUiMessage[],
+  systemPrompt: string,
+  contextSize: number,
+  maxOutputTokens: number,
+  pendingTokens = 0,
+): AipgUiMessage[] {
+  return shrinkUiMessagesForSuccessfulTurn(
+    messages,
+    systemPrompt,
+    contextSize,
+    maxOutputTokens,
+    pendingTokens,
+  ).messages
+}
+
+function findCompactSummaryMessage(messages: AipgUiMessage[]): AipgUiMessage | undefined {
+  return messages.find((m) => hasAutoCompactSummaryMessage([m]))
+}
+
+function keepCompactSummaryAndFromLastUser(messages: AipgUiMessage[]): AipgUiMessage[] {
+  const lastUserIdx = messages.findLastIndex((m) => m.role === 'user')
+  if (lastUserIdx < 0) return messages
+  const compact = findCompactSummaryMessage(messages)
+  const tail = stripReasoningFromMessages(
+    truncateToolOutputsInMessages(messages.slice(lastUserIdx), 200),
+  )
+  if (compact && messages.indexOf(compact) < lastUserIdx) {
+    return [compact, ...tail]
+  }
+  return tail
+}
+
+function keepCompactSummaryAndLastUserOnly(messages: AipgUiMessage[]): AipgUiMessage[] {
+  const lastUserIdx = messages.findLastIndex((m) => m.role === 'user')
+  if (lastUserIdx < 0) return messages.slice(-1)
+  const compact = findCompactSummaryMessage(messages)
+  const lastUser = truncateToolOutputsInMessages(
+    stripReasoningFromMessages([messages[lastUserIdx]]),
+    200,
+  )
+  if (compact && messages.indexOf(compact) < lastUserIdx) {
+    return [compact, ...lastUser]
+  }
+  return lastUser
+}
+
+function keepLastUserMessageOnly(messages: AipgUiMessage[]): AipgUiMessage[] {
+  return keepCompactSummaryAndLastUserOnly(messages)
+}
+
+type LooseModelMessage = {
+  role: string
+  content?: unknown
+}
+
+function truncateLooseToolResultOutput(output: unknown, maxChars: number): unknown {
+  if (output == null) return output
+  if (typeof output === 'object' && !Array.isArray(output)) {
+    const o = output as Record<string, unknown>
+    if (o.type === 'text' && typeof o.value === 'string') {
+      if (o.value.length <= maxChars) return output
+      return { ...o, value: clipTextForContext(o.value, maxChars) }
+    }
+    if (o.type === 'json') {
+      const text = JSON.stringify(o.value)
+      if (text.length <= maxChars) return output
+      return { type: 'text', value: clipTextForContext(text, maxChars) }
+    }
+    if (o.type === 'error-text' && typeof o.value === 'string') {
+      if (o.value.length <= maxChars) return output
+      return { ...o, value: clipTextForContext(o.value, maxChars) }
+    }
+  }
+  const asText =
+    typeof output === 'string' ? output : (() => {
+      try {
+        return JSON.stringify(output)
+      } catch {
+        return String(output)
+      }
+    })()
+  return { type: 'text', value: clipTextForContext(asText, maxChars) }
+}
+
+function truncateLooseContentPart(part: Record<string, unknown>, maxChars: number): unknown {
+  const type = typeof part.type === 'string' ? part.type : ''
+  if (type === 'text' && typeof part.text === 'string' && part.text.length > maxChars) {
+    return { ...part, text: clipTextForContext(part.text, maxChars) }
+  }
+  if (type === 'tool-call') {
+    const input = part.input
+    if (input !== undefined) {
+      const serialized = typeof input === 'string' ? input : JSON.stringify(input)
+      if (serialized.length > maxChars) {
+        return { ...part, input: clipTextForContext(serialized, maxChars) }
+      }
+    }
+  }
+  if (type === 'tool-result' && part.output !== undefined) {
+    return { ...part, output: truncateLooseToolResultOutput(part.output, maxChars) }
+  }
+  if (type === 'reasoning' && typeof part.text === 'string' && part.text.length > maxChars) {
+    return { ...part, text: clipTextForContext(part.text, maxChars) }
+  }
+  return part
+}
+
+function truncateLooseModelMessage(msg: LooseModelMessage, maxChars: number): LooseModelMessage {
+  const { content } = msg
+  if (typeof content === 'string') {
+    if (content.length <= maxChars) return msg
+    return { ...msg, content: clipTextForContext(content, maxChars) }
+  }
+  if (!Array.isArray(content)) return msg
+  const nextContent = content.map((part) => {
+    if (!part || typeof part !== 'object') return part
+    return truncateLooseContentPart(part as Record<string, unknown>, maxChars)
+  })
+  return { ...msg, content: nextContent }
+}
+
+function estimateLooseMessagesTokens(messages: LooseModelMessage[], systemPrompt: string): number {
+  const raw = estimateTextTokens(systemPrompt) + estimateTextTokens(JSON.stringify(messages))
+  return Math.ceil(raw * TOKEN_ESTIMATE_SAFETY)
+}
+
+export type TrimModelMessagesOptions = {
+  /** Follow-up model steps after tool execution — tighter send budget. */
+  toolStep?: boolean
+  /** First request in a tool-calling turn — leave headroom for tool results. */
+  toolLoop?: boolean
+  /** Last step's backend prompt token count (calibrates heuristic underestimates). */
+  measuredPromptTokens?: number
+}
+
+/** Trim model messages between tool-loop steps (truncate only — never drop messages). */
+export function trimModelMessagesToContextBudget(
+  messages: LooseModelMessage[],
+  systemPrompt: string,
+  contextSize: number,
+  maxOutputTokens: number,
+  options?: TrimModelMessagesOptions,
+): LooseModelMessage[] {
+  const hardMax = maxPromptTokensForContext(contextSize, maxOutputTokens)
+  let target = Math.min(
+    maxAllowedPromptTokens(contextSize, maxOutputTokens),
+    Math.floor(hardMax * CONTEXT_SEND_MARGIN),
+  )
+  if (options?.toolLoop) {
+    target = Math.floor(target * 0.9)
+  }
+  if (options?.toolStep) {
+    target = Math.floor(target * 0.85)
+  }
+
+  const rawEstimate = estimateLooseMessagesTokens(messages, systemPrompt)
+  if (
+    options?.measuredPromptTokens &&
+    options.measuredPromptTokens > 0 &&
+    rawEstimate > 0 &&
+    options.measuredPromptTokens > rawEstimate
+  ) {
+    target = Math.floor((target * rawEstimate) / options.measuredPromptTokens)
+  }
+  target = Math.max(target, 256)
+
+  const fits = (candidate: LooseModelMessage[]) =>
+    estimateLooseMessagesTokens(candidate, systemPrompt) <= target
+
+  let globalCap = MAX_PERSISTED_TOOL_OUTPUT_CHARS
+  let current = messages.map((m) => truncateLooseModelMessage(m, globalCap))
+  if (fits(current)) return current
+
+  while (globalCap > 48) {
+    globalCap = Math.floor(globalCap / 2)
+    current = messages.map((m) => truncateLooseModelMessage(m, globalCap))
+    if (fits(current)) return current
+  }
+
+  let baseCap = 1600
+  while (baseCap > 40) {
+    const caps = messages.map((_, i) => {
+      const ageFromEnd = messages.length - 1 - i
+      if (ageFromEnd <= 1) return Math.max(baseCap * 2, 512)
+      if (ageFromEnd <= 3) return Math.max(baseCap, 256)
+      return Math.max(Math.floor(baseCap / 2), 64)
+    })
+    current = messages.map((m, i) => truncateLooseModelMessage(m, caps[i] ?? baseCap))
+    if (fits(current)) return current
+    baseCap = Math.floor(baseCap * 0.55)
+  }
+
+  return messages.map((m) => truncateLooseModelMessage(m, 48))
+}
+
+/**
+ * Remove the failed in-flight turn before an overflow retry (partial assistant/tool steps
+ * and the user message that will be sent again).
+ */
+export function rollbackMessagesBeforeTurnRetry(messages: AipgUiMessage[]): AipgUiMessage[] {
+  let end = messages.length
+  while (end > 0 && messages[end - 1].role !== 'user') {
+    end--
+  }
+  if (end > 0 && messages[end - 1].role === 'user') {
+    end--
+  }
+  return messages.slice(0, end)
+}
+
+function alignSplitStartToUserBoundary(messages: AipgUiMessage[], tailCount: number): number {
+  let start = Math.max(messages.length - tailCount, 0)
+  while (start > 0 && messages[start].role !== 'user') {
+    start--
+  }
+  if (start >= messages.length) {
+    return Math.max(messages.length - 1, 0)
+  }
+  return start
+}
+
 export function estimatePendingUserTokens(question: string, files?: FileUIPart[]): number {
   let total = estimateTextTokens(question)
   for (const file of files ?? []) {
@@ -208,6 +628,10 @@ export function estimatePendingUserTokens(question: string, files?: FileUIPart[]
 
 export function maxPromptTokensForContext(contextSize: number, maxOutputTokens: number): number {
   return Math.max(contextSize - maxOutputTokens - CONTEXT_SLACK, 256)
+}
+
+export function maxAllowedPromptTokens(contextSize: number, maxOutputTokens: number): number {
+  return Math.floor(maxPromptTokensForContext(contextSize, maxOutputTokens) * CONTEXT_SEND_MARGIN)
 }
 
 export function projectedPromptTokens(
@@ -236,19 +660,47 @@ export function needsContextCompaction(
   pendingTokens = 0,
   measuredPromptTokens?: number,
   force = false,
+  hasStoredInferenceSummary = false,
 ): boolean {
   if (messages.length === 0 && pendingTokens <= 0) return false
-  if (shouldSkipFurtherCompaction(messages, contextSize, pendingTokens, force)) return false
   if (force && messages.length > 0) return true
-  if (historyExceedsCompactTrigger(messages, contextSize, pendingTokens)) return true
+  if (
+    projectedExceedsContext(
+      messages,
+      systemPrompt,
+      contextSize,
+      maxOutputTokens,
+      pendingTokens,
+    )
+  ) {
+    return true
+  }
   if (shouldCompactFromMeasuredUsage(measuredPromptTokens, contextSize)) return true
-  return projectedExceedsContext(
-    messages,
-    systemPrompt,
-    contextSize,
-    maxOutputTokens,
-    pendingTokens,
-  )
+  if (
+    shouldSkipFurtherCompaction(
+      messages,
+      contextSize,
+      pendingTokens,
+      force,
+      hasStoredInferenceSummary,
+      maxOutputTokens,
+    )
+  ) {
+    return false
+  }
+  if (historyExceedsCompactTrigger(messages, contextSize, pendingTokens, maxOutputTokens)) {
+    // Align with the context ring: if the last request still had clear headroom, do
+    // not run an expensive summary while the meter shows ~25%+ free.
+    if (
+      measuredPromptTokens &&
+      measuredPromptTokens > 0 &&
+      measuredPromptTokens < Math.floor(contextSize * 0.75)
+    ) {
+      return false
+    }
+    return true
+  }
+  return false
 }
 
 export function isContextOverflowErrorMessage(message: string): boolean {
@@ -263,9 +715,25 @@ export function projectedExceedsContext(
   pendingTokens = 0,
 ): boolean {
   const projected = projectedPromptTokens(messages, systemPrompt, pendingTokens)
-  const maxPrompt = maxPromptTokensForContext(contextSize, maxOutputTokens)
+  const maxPrompt = maxAllowedPromptTokens(contextSize, maxOutputTokens)
   if (projected >= contextSize - CONTEXT_SLACK) return true
   return projected >= maxPrompt
+}
+
+export function messagesFitHardContextLimit(
+  messages: AipgUiMessage[],
+  systemPrompt: string,
+  contextSize: number,
+  maxOutputTokens: number,
+  pendingTokens = 0,
+): boolean {
+  return !projectedExceedsContext(
+    messages,
+    systemPrompt,
+    contextSize,
+    maxOutputTokens,
+    pendingTokens,
+  )
 }
 
 export type InputTokenBudget = {
@@ -329,12 +797,17 @@ export function splitForTargetHistoryShare(
   tailCount = Math.max(1, tailCount - 1)
   if (tailCount >= messages.length) tailCount = messages.length - 1
 
-  const prefix = messages.slice(0, -tailCount)
+  let splitAt = alignSplitStartToUserBoundary(messages, tailCount)
+  while (splitAt <= 0 && tailCount > 1) {
+    tailCount--
+    splitAt = alignSplitStartToUserBoundary(messages, tailCount)
+  }
+  const prefix = messages.slice(0, splitAt)
   if (prefix.length === 0) return null
 
   return {
     prefix,
-    suffix: stripReasoningFromMessages(messages.slice(-tailCount)),
+    suffix: stripReasoningFromMessages(messages.slice(splitAt)),
   }
 }
 

@@ -7,14 +7,20 @@ import {
   flattenUiMessagesForSummary,
   historyExceedsTargetShare,
   maxPromptTokensForContext,
+  messagesFitHardContextLimit,
   needsContextCompaction,
   projectedPromptTokens,
+  rollbackMessagesBeforeTurnRetry,
+  shrinkUiMessagesForSuccessfulTurn,
   shouldCompactFromMeasuredUsage,
   shouldSkipFurtherCompaction,
   splitForTargetHistoryShare,
   splitMessagesForCompaction,
   targetHistoryTokenBudget,
   TARGET_HISTORY_SHARE,
+  trimModelMessagesToContextBudget,
+  maxAllowedPromptTokens,
+  resolveUiMessagesForInference,
 } from './chatContextCompact'
 
 const uiMsg = (role: string, text: string, id = 'm'): AipgUiMessage =>
@@ -94,11 +100,14 @@ describe('shouldCompactFromMeasuredUsage', () => {
 })
 
 describe('shouldSkipFurtherCompaction', () => {
-  it('skips re-compaction while history stays below the re-trigger threshold', () => {
+  it('skips re-compaction while inference tail stays below the re-trigger threshold', () => {
     const compacted = buildCompactedMessageList('Short summary.', [uiMsg('user', 'hi', 'u2')], 's')
-    expect(
-      shouldSkipFurtherCompaction(compacted, 8192, 0, false),
-    ).toBe(true)
+    const meta = {
+      inferenceContextSummary: 'Short summary.',
+      inferenceContextTailFromMessageId: 'u2',
+    }
+    const ui = resolveUiMessagesForInference(compacted, meta)
+    expect(shouldSkipFurtherCompaction(ui, 8192, 0, false, true, 512)).toBe(true)
   })
 })
 
@@ -106,6 +115,20 @@ describe('needsContextCompaction', () => {
   it('uses measured usage even when heuristics underestimate', () => {
     const shortHistory = [uiMsg('user', 'hi', 'u1')]
     expect(needsContextCompaction(shortHistory, '', 8192, 1024, 0, 8316, false)).toBe(true)
+  })
+
+  it('does not proactively compact when the backend still shows ~25%+ headroom', () => {
+    const history = [uiMsg('user', 'a'.repeat(8000), 'u1')]
+    expect(needsContextCompaction(history, '', 8192, 512, 0, 5800, false, false)).toBe(false)
+  })
+
+  it('compacts again when the prompt exceeds the hard context limit after a prior compact', () => {
+    const compacted = buildCompactedMessageList(
+      'Earlier summary.',
+      [uiMsg('user', 'a'.repeat(28000), 'u2')],
+      's',
+    )
+    expect(needsContextCompaction(compacted, '', 8192, 1024)).toBe(true)
   })
 })
 
@@ -115,10 +138,70 @@ describe('historyExceedsTargetShare', () => {
   })
 })
 
+describe('shrinkUiMessagesForSuccessfulTurn', () => {
+  it('keeps at least the latest user message under a tight budget', () => {
+    const history = [
+      ...Array.from({ length: 8 }, (_, i) =>
+        uiMsg(i % 2 === 0 ? 'user' : 'assistant', `Turn ${i} `.repeat(200), `m${i}`),
+      ),
+      uiMsg('user', 'Current question', 'current'),
+    ]
+    const shrunk = shrinkUiMessagesForSuccessfulTurn(history, 'system', 2048, 256)
+    expect(shrunk.messages.some((m) => m.id === 'current')).toBe(true)
+    expect(messagesFitHardContextLimit(shrunk.messages, 'system', 2048, 256)).toBe(true)
+  })
+})
+
+describe('rollbackMessagesBeforeTurnRetry', () => {
+  it('removes partial tool steps and the user message for retry', () => {
+    const messages = [
+      uiMsg('user', 'old', 'u1'),
+      uiMsg('assistant', 'ok', 'a1'),
+      uiMsg('user', 'retry me', 'u2'),
+      uiMsg('assistant', 'calling tool', 'a2'),
+    ]
+    expect(rollbackMessagesBeforeTurnRetry(messages)).toHaveLength(2)
+  })
+})
+
 describe('projectedPromptTokens', () => {
   it('flags prompts that would exceed the reserved context window', () => {
     const msgs = [uiMsg('user', 'a'.repeat(28000), 'u')]
     const projected = projectedPromptTokens(msgs, '', 0)
     expect(projected).toBeGreaterThan(maxPromptTokensForContext(8192, 1024))
+  })
+})
+
+describe('trimModelMessagesToContextBudget', () => {
+  it('shrinks oversized tool results so the prompt fits under the send budget', () => {
+    const huge = 'x'.repeat(120_000)
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'question' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: '1', toolName: 'search', input: { q: 'a' } }],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: '1',
+            toolName: 'search',
+            output: { type: 'text', value: huge },
+          },
+        ],
+      },
+    ]
+    const system = 'You are helpful.'
+    const trimmed = trimModelMessagesToContextBudget(messages, system, 8192, 512, {
+      toolStep: true,
+      toolLoop: true,
+    })
+    const budget = maxAllowedPromptTokens(8192, 512)
+    const estimate = Math.ceil(
+      (system.length / 4 + JSON.stringify(trimmed).length / 4) * 1.35,
+    )
+    expect(estimate).toBeLessThanOrEqual(budget)
   })
 })
