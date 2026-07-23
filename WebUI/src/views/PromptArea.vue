@@ -481,7 +481,11 @@ const isPromptModifiable = computed(() => {
 })
 
 const isTextAreaDisabled = computed(() => {
-  return !readyForNewSubmit.value || !isPromptModifiable.value
+  if (!isPromptModifiable.value) return true
+  // Chat: keep the textarea editable after a turn ends (e.g. tool-step limit) even if
+  // busy flags lag; Send vs Stop is gated by readyForNewSubmit / isProcessing.
+  if (promptStore.getCurrentMode() === 'chat') return false
+  return !readyForNewSubmit.value
 })
 
 // Context usage data for Context component

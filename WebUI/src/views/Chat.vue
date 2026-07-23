@@ -326,12 +326,15 @@
                 v-if="
                   i === activeConversation.length - 1 &&
                   !openAiCompatibleChat.processing &&
-                  openAiCompatibleChat.error &&
                   assistantTurnLooksIncomplete(message, i === activeConversation.length - 1)
                 "
-                class="text-sm text-destructive"
+                class="text-sm"
+                :class="openAiCompatibleChat.error ? 'text-destructive' : 'text-muted-foreground'"
               >
-                {{ openAiCompatibleChat.error }}
+                {{
+                  openAiCompatibleChat.error ||
+                  i18nState.COM_CHAT_TURN_INCOMPLETE_TOOL_LOOP
+                }}
               </p>
 
               <!-- Inline human-in-the-loop confirmation (e.g. Home Agent self-config).
@@ -602,6 +605,10 @@ async function handlePromptSubmit(prompt: string) {
     // chokepoint (textInference.ensureBackendReadiness).
     promptStore.promptSubmitted = false
     errors.report(error, { category: 'inference', code: 'inference/generate-failed' })
+  } finally {
+    // Do not rely on isProcessing debounce alone — SDK status/activities can desync
+    // after tool-step limits, leaving promptSubmitted true until Stop is clicked.
+    promptStore.promptSubmitted = false
   }
 }
 
@@ -863,9 +870,12 @@ function reasoningUiShouldShow(
 }
 
 function toolLoopThinkingShouldShow(message: ChatMessage, isLastMessage: boolean): boolean {
-  if (!assistantMessageUsesToolLoop(message)) return false
+  if (!assistantMessageUsesToolLoop(message) || !isLastMessage) return false
+  if (!openAiCompatibleChat.processing && !openAiCompatibleChat.reasoningInProgress) {
+    return false
+  }
   if (latestReasoningPlainText(message)) return true
-  return isLastMessage && openAiCompatibleChat.reasoningInProgress
+  return openAiCompatibleChat.reasoningInProgress
 }
 
 function assistantTurnLooksIncomplete(message: ChatMessage, isLastMessage: boolean): boolean {
@@ -897,7 +907,7 @@ function assistantTurnLooksIncomplete(message: ChatMessage, isLastMessage: boole
   if (postToolTexts.length === 0) return true
 
   const combined = postToolTexts.join('\n')
-  if (combined.length < 280 && looksLikeToolLoopPlanningText(combined)) {
+  if (looksLikeToolLoopPlanningText(combined)) {
     return true
   }
 
@@ -905,9 +915,19 @@ function assistantTurnLooksIncomplete(message: ChatMessage, isLastMessage: boole
 }
 
 function looksLikeToolLoopPlanningText(text: string): boolean {
-  return /^(I need to|Let me |Now I |So I |Now it |Hmm|Wait,|The tool|Maybe I|It seems|I'll try|I should|I will try)/i.test(
-    text.trim(),
-  )
+  const t = text.trim()
+  if (!t) return false
+  if (
+    /^(I need to|Let me |Now I |So I |Now it |Hmm|Wait,|The tool|Maybe I|It seems|I'll try|I should|I will try|Good,|Okay,|OK,|Alright,|Next,|First,)/i.test(
+      t,
+    )
+  ) {
+    return true
+  }
+  if (t.length < 600 && /\b(I need to|Now I need|let me try|I'll try|I will try|next,? I)\b/i.test(t)) {
+    return true
+  }
+  return false
 }
 
 type ReasoningUiPart = {

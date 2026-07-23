@@ -178,13 +178,13 @@
           </div>
           <input
             type="number"
-            v-model.number="toolLoopMaxStepsDraft"
+            v-model.number="textInference.toolLoopMaxStepsDraft"
             :min="textInference.toolLoopMaxStepsMin"
             :max="textInference.toolLoopMaxStepsMax"
             step="1"
             class="rounded-sm text-foreground text-center h-7 w-20 leading-7 p-0 bg-transparent border border-border"
-            @blur="commitToolLoopMaxSteps"
-            @keydown.enter="commitToolLoopMaxSteps"
+            @blur="textInference.commitToolLoopMaxStepsDraft()"
+            @keydown.enter="textInference.commitToolLoopMaxStepsDraft()"
           />
         </div>
 
@@ -276,7 +276,6 @@ import DeviceSelector from '@/components/DeviceSelector.vue'
 import ModelSelector from '@/components/ModelSelector.vue'
 import AddLLMDialog from '@/components/AddLLMDialog.vue'
 import { ref, computed, watch } from 'vue'
-import { clampToolLoopMaxSteps } from '@/assets/js/chatContextCompact'
 import { useI18N } from '@/assets/js/store/i18n.ts'
 import Rag from '@/components/Rag.vue'
 import SettingsMcp from '@/components/SettingsMcp.vue'
@@ -296,20 +295,6 @@ const showUploader = ref(false)
 const processing = ref(false)
 const i18nState = useI18N().state
 const textInference = useTextInference()
-const toolLoopMaxStepsDraft = ref(textInference.toolLoopMaxSteps)
-watch(
-  () => textInference.toolLoopMaxSteps,
-  (value) => {
-    toolLoopMaxStepsDraft.value = value
-  },
-)
-
-function commitToolLoopMaxSteps() {
-  const clamped = clampToolLoopMaxSteps(toolLoopMaxStepsDraft.value)
-  textInference.toolLoopMaxSteps = clamped
-  toolLoopMaxStepsDraft.value = clamped
-}
-
 const presetsStore = usePresets()
 const presetSwitching = usePresetSwitching()
 const backendServices = useBackendServices()

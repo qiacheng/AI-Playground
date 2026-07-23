@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
+import { stripContextTruncationMarker } from '@/lib/utils'
+
+const displayText = computed(() => stripContextTruncationMarker(props.text ?? ''))
 
 const props = defineProps<{
   text?: string
@@ -64,7 +67,7 @@ const statusText = computed(() => {
     <MarkdownRenderer
       v-if="isExpanded"
       class="border-l-2 border-border pl-4 text-muted-foreground"
-      :content="text ?? ''"
+      :content="displayText"
       :on-copy="onCopy"
     />
   </div>

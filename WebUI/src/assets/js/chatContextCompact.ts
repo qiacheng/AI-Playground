@@ -287,7 +287,20 @@ export function estimateUiMessagesTokens(messages: AipgUiMessage[]): number {
 function clipTextForContext(text: string, maxChars: number): string {
   const trimmed = text.trim()
   if (trimmed.length <= maxChars) return trimmed
-  return `${trimmed.slice(0, maxChars).trimEnd()}… [truncated for context]`
+  // Ellipsis only — a verbose marker in tool results gets echoed in thinking models.
+  return `${trimmed.slice(0, maxChars).trimEnd()}…`
+}
+
+function stripReasoningFromLooseModelMessages(messages: LooseModelMessage[]): LooseModelMessage[] {
+  return messages.map((msg) => {
+    if (!Array.isArray(msg.content)) return msg
+    const content = msg.content.filter((part) => {
+      if (!part || typeof part !== 'object') return true
+      return (part as Record<string, unknown>).type !== 'reasoning'
+    })
+    if (content.length === msg.content.length) return msg
+    return { ...msg, content }
+  })
 }
 
 function toolPartOutputAsText(part: UiPart): string {
@@ -562,6 +575,11 @@ export function trimModelMessagesToContextBudget(
   maxOutputTokens: number,
   options?: TrimModelMessagesOptions,
 ): LooseModelMessage[] {
+  let working = messages
+  if (options?.toolLoop || options?.toolStep) {
+    working = stripReasoningFromLooseModelMessages(working)
+  }
+
   const hardMax = maxPromptTokensForContext(contextSize, maxOutputTokens)
   let target = Math.min(
     maxAllowedPromptTokens(contextSize, maxOutputTokens),
@@ -574,7 +592,7 @@ export function trimModelMessagesToContextBudget(
     target = Math.floor(target * 0.85)
   }
 
-  const rawEstimate = estimateLooseMessagesTokens(messages, systemPrompt)
+  const rawEstimate = estimateLooseMessagesTokens(working, systemPrompt)
   if (
     options?.measuredPromptTokens &&
     options.measuredPromptTokens > 0 &&
@@ -598,29 +616,29 @@ export function trimModelMessagesToContextBudget(
     estimateLooseMessagesTokens(candidate, systemPrompt) <= target
 
   let globalCap = MAX_PERSISTED_TOOL_OUTPUT_CHARS
-  let current = messages.map((m) => truncateLooseModelMessage(m, globalCap))
+  let current = working.map((m) => truncateLooseModelMessage(m, globalCap))
   if (fits(current)) return finishTrim(current)
 
   while (globalCap > 48) {
     globalCap = Math.floor(globalCap / 2)
-    current = messages.map((m) => truncateLooseModelMessage(m, globalCap))
+    current = working.map((m) => truncateLooseModelMessage(m, globalCap))
     if (fits(current)) return finishTrim(current)
   }
 
   let baseCap = 1600
   while (baseCap > 40) {
-    const caps = messages.map((_, i) => {
-      const ageFromEnd = messages.length - 1 - i
+    const caps = working.map((_, i) => {
+      const ageFromEnd = working.length - 1 - i
       if (ageFromEnd <= 1) return Math.max(baseCap * 2, 512)
       if (ageFromEnd <= 3) return Math.max(baseCap, 256)
       return Math.max(Math.floor(baseCap / 2), 64)
     })
-    current = messages.map((m, i) => truncateLooseModelMessage(m, caps[i] ?? baseCap))
+    current = working.map((m, i) => truncateLooseModelMessage(m, caps[i] ?? baseCap))
     if (fits(current)) return finishTrim(current)
     baseCap = Math.floor(baseCap * 0.55)
   }
 
-  current = messages.map((m) => truncateLooseModelMessage(m, 48))
+  current = working.map((m) => truncateLooseModelMessage(m, 48))
   if (fits(current)) return finishTrim(current)
 
   return finishTrim(current)

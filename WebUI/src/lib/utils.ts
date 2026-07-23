@@ -43,9 +43,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-/** Strip internal context-budget marker from text shown in the chat UI. */
+/** Strip internal context-budget markers from text shown in the chat UI. */
 export function stripContextTruncationMarker(text: string): string {
-  return text.replace(/\s*…?\s*\[truncated for context\]\s*$/i, '').trim()
+  return text
+    .replace(/\s*…?\s*\[truncated for context\]/gi, '')
+    .replace(/(\s*…\s*){2,}/g, ' … ')
+    .trim()
 }
 
 /** Single-line preview for in-turn thinking (tool loops). */

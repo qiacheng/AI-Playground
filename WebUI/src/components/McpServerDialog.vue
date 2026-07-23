@@ -1,6 +1,6 @@
 <template>
   <Dialog v-model:open="isOpen">
-    <DialogContent class="sm:max-w-[425px]">
+    <DialogContent class="sm:max-w-[480px] max-h-[min(90vh,640px)] overflow-y-auto">
       <DialogHeader>
         <DialogTitle>MCP Server Configuration</DialogTitle>
       </DialogHeader>
@@ -51,16 +51,18 @@
         </div>
 
         <div class="flex flex-col gap-2">
-          <Label for="instructions">Instructions (optional)</Label>
+          <Label for="mcp-server-instructions">Instructions (optional)</Label>
           <Textarea
-            id="instructions"
+            id="mcp-server-instructions"
             v-model="instructions"
-            rows="4"
-            placeholder="e.g. Always call get_current_time before answering time-related questions."
+            rows="6"
+            class="max-h-52 min-h-24 resize-y overflow-y-auto [field-sizing:fixed]"
+            placeholder="Short guidance for the model (when/how to use this server's tools). Keep concise — very long text belongs in mcp.json edited externally."
           />
           <span class="text-xs text-muted-foreground">
-            Sent to the model as part of the system prompt when this server is connected. Useful for
-            telling smaller models when and how to use this server's tools.
+            Appended to the system prompt when this server is connected. This field scrolls; it does
+            not expand the whole window. For multi-page instructions, use Edit mcp.json and keep
+            valid JSON (the whole block must be one quoted string).
           </span>
         </div>
       </div>

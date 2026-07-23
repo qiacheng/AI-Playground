@@ -22,6 +22,7 @@ import { useErrors } from './errors'
 import { useActivities } from './activities'
 import { useConfirmations } from './confirmations'
 import { useI18N } from './i18n'
+import { usePromptStore } from './promptArea'
 import { createAppError, extractMessage, isCancellation } from '../errors/appError'
 import type { AppError } from '../errors/types'
 import { aipgTools, homeAgentTools } from '../tools/tools'
@@ -53,10 +54,10 @@ import {
   TOOL_TURN_CONTEXT_RESERVE_TOKENS,
   trimModelMessagesToContextBudget,
   truncateToolOutputsInMessages,
-  clampToolLoopMaxSteps,
   DEFAULT_TOOL_LOOP_MAX_STEPS,
 } from '@/assets/js/chatContextCompact'
 import * as toast from '@/assets/js/toast.ts'
+import { createMcpToolLoopGuard, type McpToolLoopGuard } from '@/assets/js/mcpToolLoopGuard'
 
 /** @deprecated Use {@link DEFAULT_TOOL_LOOP_MAX_STEPS} or per-user `toolLoopMaxSteps`. */
 export const TOOL_LOOP_MAX_STEPS = DEFAULT_TOOL_LOOP_MAX_STEPS
@@ -138,6 +139,7 @@ export const useOpenAiCompatibleChat = defineStore(
     const errors = useErrors()
     const activities = useActivities()
     const confirmations = useConfirmations()
+    const promptStore = usePromptStore()
     const i18nState = useI18N().state
     const manuallyStopped = ref(false)
     /** Whole generate()/sendMessage turn, including gaps while MCP/tools run between stream steps. */
@@ -186,6 +188,30 @@ export const useOpenAiCompatibleChat = defineStore(
       activities.end(id)
     }
 
+    /** End all chat-scoped turn activities so prompt busy state cannot stick after send completes. */
+    function reconcileChatTurnUi(conversationKey: string): void {
+      endTurnPrepActivity(conversationKey)
+      activities.endScope(
+        (a) => a.scope.kind === 'chat' && a.scope.conversationKey === conversationKey,
+      )
+    }
+
+    /**
+     * Unlock prompt area when the HTTP stream finishes. `chat.sendMessage()` can stay
+     * pending after `onFinish` (tool-step cap, SDK status stuck on "streaming") while
+     * llama slots are already idle — without this the user must click Stop to type again.
+     */
+    function releaseChatPromptUi(conversationKey: string): void {
+      turnInFlightConversations.delete(conversationKey)
+      reconcileChatTurnUi(conversationKey)
+      if (
+        conversationKey === conversations.activeKey &&
+        promptStore.getCurrentMode() === 'chat'
+      ) {
+        promptStore.promptSubmitted = false
+      }
+    }
+
     function adoptTurnPrepActivity(conversationKey: string): string | null {
       const id = turnPrepActivityByConversation.get(conversationKey)
       if (!id) return null
@@ -201,12 +227,13 @@ export const useOpenAiCompatibleChat = defineStore(
     const chats: Record<string, Chat<AipgUiMessage>> = {}
 
     const processing = computed(() => {
-      // If manually stopped, immediately return false to unblock UI
       if (manuallyStopped.value) return false
       const key = conversations.activeKey
       if (turnInFlightConversations.has(key)) return true
-      const status = chats[key]?.status
-      return status === 'submitted' || status === 'streaming'
+      // Do not trust AI SDK Chat.status — it often stays "streaming" after the HTTP
+      // stream finished (e.g. tool-step limit, idle llama slots). Busy = in-flight
+      // generate/regenerate or an active chat-scoped activity only.
+      return activities.chatActivity(key) !== null
     })
 
     // Safety net: when the active turn ends (completes, is stopped, or errors
@@ -217,17 +244,11 @@ export const useOpenAiCompatibleChat = defineStore(
       (isProcessing, wasProcessing) => {
         if (wasProcessing && !isProcessing) {
           reasoningInProgress.value = false
-          const key = conversations.activeKey
-          activities.endScope(
-            (a) =>
-              a.scope.kind === 'chat' &&
-              a.scope.conversationKey === key &&
-              (a.category === 'inference' || a.category === 'tools'),
-          )
+          reconcileChatTurnUi(conversations.activeKey)
           // Settle any confirmation still awaiting input for this turn as
           // declined, so a tool's execute() can never hang on a card the user
           // will never see again (stopped/errored/navigated-away turn).
-          confirmations.cancelForConversation(key, false)
+          confirmations.cancelForConversation(conversations.activeKey, false)
         }
       },
     )
@@ -334,11 +355,14 @@ export const useOpenAiCompatibleChat = defineStore(
       return !excludedKeywords.some((keyword) => name.includes(keyword))
     }
 
-    async function resolveTools(): Promise<ToolSet> {
+    async function resolveTools(
+      mcpLoopGuard?: McpToolLoopGuard,
+      conversationKey?: string,
+    ): Promise<ToolSet> {
       if (!textInference.modelSupportsToolCalling) return {}
 
       const builtinTools = resolveBuiltinTools()
-      const mcpTools = await resolveMcpTools()
+      const mcpTools = await resolveMcpTools(mcpLoopGuard, conversationKey)
       return { ...builtinTools, ...mcpTools }
     }
 
@@ -402,10 +426,19 @@ export const useOpenAiCompatibleChat = defineStore(
       }
 
       if (blocks.length === 0) return ''
-      return `\n\n# MCP server instructions\n\n${blocks.join('\n\n')}`
+      return (
+        `\n\n# MCP server instructions\n\n${blocks.join('\n\n')}` +
+        '\n\n## MCP anti-loop (mandatory)\n' +
+        'Do not repeat the same failed MCP call with identical arguments. After two failures with the same error, ' +
+        'change parameters or stop and tell the user what is blocked. Minimize list_toolsets/describe_toolset — ' +
+        'reuse earlier tool results and refPath values for the rest of the turn.'
+      )
     }
 
-    async function resolveMcpTools(): Promise<ToolSet> {
+    async function resolveMcpTools(
+      mcpLoopGuard?: McpToolLoopGuard,
+      conversationKey?: string,
+    ): Promise<ToolSet> {
       if (!textInference.mcpToolsEnabled) return {}
 
       const resolvedTools: ToolSet = {}
@@ -440,6 +473,7 @@ export const useOpenAiCompatibleChat = defineStore(
 
         for (const mcpTool of mcpTools) {
           const aiToolName = `mcp__${server.id}__${mcpTool.name}`
+          const toolScopeKey = conversationKey ?? conversations.activeKey
           resolvedTools[aiToolName] = dynamicTool({
             description: mcpTool.description || `${server.name} tool: ${mcpTool.name}`,
             inputSchema: jsonSchema({
@@ -449,11 +483,15 @@ export const useOpenAiCompatibleChat = defineStore(
             } as JSONSchema7),
             execute: async (input) => {
               const args = input as Record<string, unknown>
+              const blocked = mcpLoopGuard?.checkBeforeCall(server.id, mcpTool.name, args)
+              if (blocked) {
+                return blocked
+              }
               return await activities.track(
                 {
                   category: 'tools',
                   label: i18nState.COM_ACTIVITY_RUNNING_TOOL.replace('{tool}', mcpTool.name),
-                  scope: { kind: 'chat', conversationKey: conversations.activeKey },
+                  scope: { kind: 'chat', conversationKey: toolScopeKey },
                 },
                 () => window.electronAPI.mcp.invokeServerTool(server.id, mcpTool.name, args),
               )
@@ -1178,9 +1216,10 @@ export const useOpenAiCompatibleChat = defineStore(
       }
 
       // Only enable tools if model supports tool calling and tools are enabled
+      const mcpLoopGuard = createMcpToolLoopGuard()
       const availableTools = await activities.track(
         { category: 'tools', label: i18nState.COM_ACTIVITY_PREPARING_TOOLS, scope: activityScope },
-        () => resolveTools(),
+        () => resolveTools(mcpLoopGuard, requestConversationKey ?? conversations.activeKey),
       )
       const hasTools = Object.keys(availableTools).length > 0
 
@@ -1235,7 +1274,7 @@ export const useOpenAiCompatibleChat = defineStore(
       let toolLoopStepCount = 0
       let lastStepInputTokens = 0
       const systemPromptForCompact = `${baseSystemPrompt}${mcpInstructions}`
-      const toolLoopStepCap = clampToolLoopMaxSteps(textInference.toolLoopMaxSteps)
+      const toolLoopStepCap = textInference.getToolLoopMaxSteps()
       if (haDiag) {
         const toolNames = Object.keys(availableTools)
         console.log(
@@ -1472,6 +1511,8 @@ export const useOpenAiCompatibleChat = defineStore(
         onFinish: (result) => {
           finishTime = Date.now()
           reasoningInProgress.value = false
+          clearInferenceActivity()
+          releaseChatPromptUi(activityScope.conversationKey)
           if (
             hasTools &&
             !manuallyStopped.value &&
@@ -1495,7 +1536,6 @@ export const useOpenAiCompatibleChat = defineStore(
                 `finalInTok=${result.usage?.inputTokens ?? '?'} finalOutTok=${result.usage?.outputTokens ?? '?'}`,
             )
           }
-          clearInferenceActivity()
           if (result.usage) {
             usage = result.usage
           } else if (usageFromRawChunk) {
@@ -1571,6 +1611,7 @@ export const useOpenAiCompatibleChat = defineStore(
         // an error.
         onError: (error) => {
           if (manuallyStopped.value) return
+          releaseChatPromptUi(conversationKey)
           const isActiveDesktop = conversationKey === conversations.activeKey
           turnErrors.set(
             conversationKey,
@@ -1712,6 +1753,14 @@ export const useOpenAiCompatibleChat = defineStore(
 
       // 4. Get chat instance and send message
       const chat = getOrCreateChat(targetKey)
+      if (chat.status === 'submitted' || chat.status === 'streaming') {
+        try {
+          await chat.stop()
+        } catch {
+          /* prior turn may already be settled */
+        }
+        releaseChatPromptUi(targetKey)
+      }
       const systemPromptForCompact = await resolveSystemPromptForInference(ragContext.systemPrompt)
       const effectiveFiles =
         options?.files && options.files.length > 0
@@ -1774,7 +1823,13 @@ export const useOpenAiCompatibleChat = defineStore(
         }
 
         if (!hadError) {
-          await retryReasoningOnlyTurnIfNeeded(targetKey)
+          turnInFlightConversations.add(targetKey)
+          try {
+            await retryReasoningOnlyTurnIfNeeded(targetKey)
+          } finally {
+            turnInFlightConversations.delete(targetKey)
+            reconcileChatTurnUi(targetKey)
+          }
         }
 
         // The Chat onError hook records stream failures. A failed turn should keep
@@ -1801,7 +1856,7 @@ export const useOpenAiCompatibleChat = defineStore(
         }
       } finally {
         turnInFlightConversations.delete(targetKey)
-        endTurnPrepActivity(targetKey)
+        reconcileChatTurnUi(targetKey)
       }
     }
 
@@ -1812,13 +1867,7 @@ export const useOpenAiCompatibleChat = defineStore(
       try {
         await chats[key]?.stop()
       } finally {
-        endTurnPrepActivity(key)
-        activities.endScope(
-          (a) =>
-            a.scope.kind === 'chat' &&
-            a.scope.conversationKey === key &&
-            (a.category === 'inference' || a.category === 'tools'),
-        )
+        releaseChatPromptUi(key)
         confirmations.cancelForConversation(key, false)
       }
     }
@@ -1890,7 +1939,7 @@ export const useOpenAiCompatibleChat = defineStore(
         conversations.updateConversation(messages.value, targetKey)
       } finally {
         turnInFlightConversations.delete(targetKey)
-        endTurnPrepActivity(targetKey)
+        reconcileChatTurnUi(targetKey)
       }
     }
 

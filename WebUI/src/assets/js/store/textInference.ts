@@ -364,6 +364,20 @@ export const useTextInference = defineStore(
     const autoContextCompactEnabled = ref<boolean>(true)
     /** Max model↔tool round-trips per send when built-in or MCP tools are enabled. */
     const toolLoopMaxSteps = ref<number>(DEFAULT_TOOL_LOOP_MAX_STEPS)
+    /** Settings input draft; synced to `toolLoopMaxSteps` on blur/Enter and before each tool turn. */
+    const toolLoopMaxStepsDraft = ref<number>(DEFAULT_TOOL_LOOP_MAX_STEPS)
+
+    function commitToolLoopMaxStepsDraft(): void {
+      const clamped = clampToolLoopMaxSteps(toolLoopMaxStepsDraft.value)
+      toolLoopMaxSteps.value = clamped
+      toolLoopMaxStepsDraft.value = clamped
+    }
+
+    /** Authoritative cap for AI SDK `stopWhen: stepCountIs(...)` — flushes the settings draft first. */
+    function getToolLoopMaxSteps(): number {
+      commitToolLoopMaxStepsDraft()
+      return toolLoopMaxSteps.value
+    }
     const temperature = ref<number>(0.7)
 
     // Get max context size from current model
@@ -1272,6 +1286,7 @@ export const useTextInference = defineStore(
       toolLoopMaxSteps.value = clampToolLoopMaxSteps(
         (savedSettings.toolLoopMaxSteps as number | undefined) ?? DEFAULT_TOOL_LOOP_MAX_STEPS,
       )
+      toolLoopMaxStepsDraft.value = toolLoopMaxSteps.value
 
       // Load temperature
       if (savedSettings.temperature !== undefined) {
@@ -1602,6 +1617,9 @@ export const useTextInference = defineStore(
       contextSize,
       autoContextCompactEnabled,
       toolLoopMaxSteps,
+      toolLoopMaxStepsDraft,
+      commitToolLoopMaxStepsDraft,
+      getToolLoopMaxSteps,
       toolLoopMaxStepsMin: MIN_TOOL_LOOP_MAX_STEPS,
       toolLoopMaxStepsMax: MAX_TOOL_LOOP_MAX_STEPS,
       maxContextSizeFromModel,

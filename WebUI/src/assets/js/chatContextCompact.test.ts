@@ -181,7 +181,8 @@ describe('clampTranscriptForSummaryGeneration', () => {
     const huge = 'word '.repeat(50_000)
     const clamped = clampTranscriptForSummaryGeneration(huge, 8192, 512)
     expect(clamped.length).toBeLessThan(huge.length)
-    expect(clamped).toContain('[truncated for context]')
+    expect(clamped.length).toBeLessThan(huge.length)
+    expect(clamped.endsWith('…')).toBe(true)
   })
 })
 

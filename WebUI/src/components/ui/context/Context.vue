@@ -72,7 +72,7 @@ const outputTokensFormatted = computed(() => formatNumber(props.usage?.outputTok
 <template>
   <HoverCard v-bind="forwarded">
     <HoverCardTrigger as-child>
-      <Button type="button" variant="ghost">
+      <Button type="button" variant="ghost" title="Context window usage (not generation progress)">
         <span class="font-medium text-muted-foreground">
           {{ renderedPercent }}
         </span>
