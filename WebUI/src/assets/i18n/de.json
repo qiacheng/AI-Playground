@@ -307,6 +307,8 @@
   "COM_DELETE_IMAGE_EXPLANATION": "Dies wird das Bild dauerhaft ausblenden. Die Datei auf der Festplatte bleibt erhalten.",
   "ANSWER_MAX_TOKENS": "Maximale Tokenanzahl",
   "ANSWER_CONTEXT_SIZE": "Kontextgröße",
+  "ANSWER_AUTO_CONTEXT_COMPACT": "Kontext automatisch komprimieren",
+  "ANSWER_AUTO_CONTEXT_COMPACT_HINT": "Wenn der Chat etwa die Hälfte des Kontextfensters ausfüllt, werden ältere Nachrichten einmal zusammengefasst, sodass System und Verlauf etwa 30 % des Kontexts nutzen (~70 % für neue Nachrichten). Eine erneute Zusammenfassung erfolgt erst, wenn der Chat wieder deutlich wächst.",
   "ANSWER_METRICS": "Metriken",
   "ANSWER_FONT_SIZE": "Schriftgröße",
   "RAG_DOCUMENT_EMBEDDING_MODEL": "Dokument-Einbettungsmodell",

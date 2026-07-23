@@ -31,6 +31,20 @@ import { LanguageModelV2ToolResultOutput, JSONSchema7 } from '@ai-sdk/provider'
 import { dynamicTool, jsonSchema } from '@ai-sdk/provider-utils'
 import { imageUrlToDataUri } from '@/lib/utils'
 import { getHomeAgentAuthToken, invalidateHomeAgentAuthToken } from '@/lib/loopbackAuth'
+import {
+  appendAutoCompactSystemInstruction,
+  buildCompactedMessageList,
+  buildContextSummaryPrompt,
+  clampSummaryToHistoryBudget,
+  compactedHistoryFitsBudget,
+  estimatePendingUserTokens,
+  flattenUiMessagesForSummary,
+  isContextOverflowErrorMessage,
+  needsContextCompaction,
+  splitForTargetHistoryShare,
+  stripUsageFromMessages,
+} from '@/assets/js/chatContextCompact'
+import * as toast from '@/assets/js/toast.ts'
 
 // Web tools that share browseWeb's single "Browse the web" enablement toggle:
 // they all act on the same background browser browseWeb drives.
@@ -151,6 +165,11 @@ export const useOpenAiCompatibleChat = defineStore(
       },
     )
 
+    // When true, the next inference request omits thinking (used for context summarization).
+    const suppressThinkingInRequest = ref(false)
+    /** One-shot retry when a thinking model returns reasoning but no answer text. */
+    const oneShotSuppressThinking = ref(false)
+
     const model = computed(() =>
       createOpenAICompatible({
         name: 'model',
@@ -166,7 +185,10 @@ export const useOpenAiCompatibleChat = defineStore(
                 ...args,
                 chat_template_kwargs: {
                   ...(args.chat_template_kwargs as Record<string, unknown> | undefined),
-                  enable_thinking: textInference.thinkingEnabled,
+                  enable_thinking:
+                    suppressThinkingInRequest.value || oneShotSuppressThinking.value
+                      ? false
+                      : textInference.thinkingEnabled,
                 },
               }
             : args,
@@ -362,6 +384,263 @@ export const useOpenAiCompatibleChat = defineStore(
       return resolvedTools
     }
 
+    function effectiveContextSizeForBudget(): number {
+      if (textInference.contextSizeIsDynamic) {
+        return textInference.maxContextSizeFromModel ?? textInference.contextSize
+      }
+      return textInference.contextSize
+    }
+
+    function resolveMaxOutputTokens(): number {
+      const configured = textInference.maxTokens
+      if (textInference.thinkingEnabled && textInference.modelSupportsThinkingToggle) {
+        return Math.max(configured, 512)
+      }
+      return Math.max(configured, 1)
+    }
+
+    function getLastMeasuredPromptTokens(messages: AipgUiMessage[]): number | undefined {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const inputTokens = messages[i].metadata?.usage?.inputTokens
+        if (inputTokens && inputTokens > 0) return inputTokens
+      }
+      return undefined
+    }
+
+    /**
+     * Compaction: fold older turns into a summary so the full prompt targets ~30% of context.
+     */
+    async function compactConversationToTargetHistoryShare(
+      conversationKey: string,
+      systemPrompt: string,
+      preserveFromIndex: number,
+      pendingTokens = 0,
+      force = false,
+    ): Promise<boolean> {
+      if (!textInference.autoContextCompactEnabled) return false
+
+      const chat = chats[conversationKey]
+      if (!chat) return false
+
+      const preserveEnd = Math.min(Math.max(preserveFromIndex, 0), chat.messages.length)
+      const head = completeOrphanedToolParts(
+        chat.messages.slice(0, preserveEnd) as AipgUiMessage[],
+      )
+      const tail = chat.messages.slice(preserveEnd)
+      if (head.length === 0) return false
+
+      const contextSize = effectiveContextSizeForBudget()
+      const maxOutputTokens = resolveMaxOutputTokens()
+      const allForCheck = [...head, ...tail]
+      const measured = getLastMeasuredPromptTokens(chat.messages)
+      if (
+        !force &&
+        !needsContextCompaction(
+          allForCheck,
+          systemPrompt,
+          contextSize,
+          maxOutputTokens,
+          pendingTokens,
+          measured,
+          false,
+        )
+      ) {
+        return false
+      }
+
+      let split = splitForTargetHistoryShare(head, contextSize, systemPrompt)
+      if (!split && head.length >= 2) {
+        split = { prefix: head.slice(0, -1), suffix: head.slice(-1) }
+      }
+      if (!split) return false
+
+      const activityScope = { kind: 'chat' as const, conversationKey }
+      const runSummary = async (transcript: string, concise: boolean) => {
+        const { text } = await generateText({
+          model: model.value,
+          prompt: buildContextSummaryPrompt(transcript, concise),
+          maxOutputTokens: concise ? 256 : 512,
+          temperature: 0.2,
+        })
+        return text.trim()
+      }
+
+      let summary = ''
+      suppressThinkingInRequest.value = true
+      try {
+        const transcript = flattenUiMessagesForSummary(split.prefix)
+        if (!transcript.trim()) return false
+
+        summary = await activities.track(
+          {
+            category: 'inference',
+            label: i18nState.COM_ACTIVITY_COMPACTING_CONTEXT,
+            scope: activityScope,
+          },
+          () => runSummary(transcript, false),
+        )
+      } catch (error) {
+        errors.report(error, {
+          category: 'inference',
+          code: 'inference/context-compact-failed',
+          userMessage: `Could not compact conversation context: ${extractMessage(error)}`,
+          surface: conversationKey === conversations.activeKey ? 'toast' : 'silent',
+          context: { conversationKey },
+        })
+        return false
+      } finally {
+        suppressThinkingInRequest.value = false
+      }
+
+      if (!summary) return false
+
+      summary = clampSummaryToHistoryBudget(summary, contextSize, systemPrompt, split.suffix)
+
+      let compactedHead = buildCompactedMessageList(
+        summary,
+        split.suffix,
+        globalThis.crypto.randomUUID(),
+      )
+
+      if (!compactedHistoryFitsBudget(compactedHead, contextSize, systemPrompt, pendingTokens)) {
+        suppressThinkingInRequest.value = true
+        try {
+          const shorter = await runSummary(summary, true)
+          if (shorter) {
+            const shorterClamped = clampSummaryToHistoryBudget(
+              shorter,
+              contextSize,
+              systemPrompt,
+              split.suffix,
+            )
+            compactedHead = buildCompactedMessageList(
+              shorterClamped,
+              split.suffix,
+              globalThis.crypto.randomUUID(),
+            )
+          }
+        } finally {
+          suppressThinkingInRequest.value = false
+        }
+      }
+
+      const nextMessages = stripUsageFromMessages([...compactedHead, ...tail])
+      chat.messages.splice(0, chat.messages.length, ...nextMessages)
+      conversations.updateConversation(nextMessages, conversationKey)
+
+      const existingMeta = conversations.getThreadMeta(conversationKey)
+      if (existingMeta?.presetName) {
+        conversations.setThreadMeta(conversationKey, {
+          ...existingMeta,
+          contextCompactedForContextSize: contextSize,
+        })
+      }
+
+      return true
+    }
+
+    async function ensureConversationFitsContext(
+      conversationKey: string,
+      systemPrompt: string,
+      opts: { preserveFromIndex?: number; pendingTokens?: number; force?: boolean },
+    ): Promise<void> {
+      if (!textInference.autoContextCompactEnabled) return
+
+      const chat = chats[conversationKey]
+      if (!chat) return
+
+      const preserveFromIndex = opts.preserveFromIndex ?? chat.messages.length
+      await compactConversationToTargetHistoryShare(
+        conversationKey,
+        systemPrompt,
+        preserveFromIndex,
+        opts.pendingTokens ?? 0,
+        !!opts.force,
+      )
+    }
+
+    async function retryAfterContextOverflow(
+      conversationKey: string,
+      systemPrompt: string,
+      sendPayload: {
+        text: string
+        files?: FileUIPart[]
+        metadata: { model: string | null; timestamp: number }
+      },
+    ): Promise<void> {
+      const chat = chats[conversationKey]
+      if (!chat) return
+
+      const last = chat.messages.at(-1)
+      if (last?.role === 'assistant') {
+        chat.messages.pop()
+      } else if (last?.role === 'user') {
+        chat.messages.pop()
+      }
+      conversations.updateConversation(chat.messages, conversationKey)
+
+      await ensureConversationFitsContext(conversationKey, systemPrompt, {
+        preserveFromIndex: chat.messages.length,
+        force: true,
+      })
+
+      await chat.sendMessage(sendPayload)
+    }
+
+    async function resolveSystemPromptForInference(
+      ragSystemPrompt: string,
+    ): Promise<string> {
+      const mcpInstructions = await resolveMcpInstructions()
+      return `${ragSystemPrompt}${mcpInstructions}`
+    }
+
+    function assistantMessageHasAnswerText(message: AipgUiMessage | undefined): boolean {
+      if (!message || message.role !== 'assistant') return false
+      return (
+        message.parts?.some((part) => {
+          if (part.type !== 'text') return false
+          const text = (part as { text?: string }).text ?? ''
+          return text.trim().length > 0
+        }) ?? false
+      )
+    }
+
+    /**
+     * Qwen3-family models with thinking enabled sometimes finish after a reasoning
+     * block with no user-visible answer. Retry once with thinking disabled.
+     */
+    async function retryReasoningOnlyTurnIfNeeded(conversationKey: string): Promise<void> {
+      if (
+        manuallyStopped.value ||
+        !textInference.thinkingEnabled ||
+        !textInference.modelSupportsThinkingToggle
+      ) {
+        return
+      }
+
+      const chat = chats[conversationKey]
+      if (!chat) return
+
+      const last = chat.messages.at(-1)
+      if (!last || last.role !== 'assistant') return
+      if (assistantMessageHasAnswerText(last)) return
+      const hasReasoning = last.parts?.some((p) => p.type === 'reasoning')
+      if (!hasReasoning) return
+
+      const assistantId = last.id
+      oneShotSuppressThinking.value = true
+      try {
+        await chat.regenerate({ messageId: assistantId })
+      } finally {
+        oneShotSuppressThinking.value = false
+      }
+
+      const after = chat.messages.at(-1)
+      if (!assistantMessageHasAnswerText(after)) {
+        toast.warning(i18nState.COM_TOAST_THINKING_ONLY_REPLY)
+      }
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const customFetch = async (_: any, options: any) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -398,12 +677,20 @@ export const useOpenAiCompatibleChat = defineStore(
         { category: 'tools', label: i18nState.COM_ACTIVITY_PREPARING_TOOLS, scope: activityScope },
         () => resolveMcpInstructions(),
       )
-      const systemPromptToUse = `${baseSystemPrompt}${mcpInstructions}`
+      const compactConversationKey = requestConversationKey ?? conversations.activeKey
+      const uiMessageSource =
+        chats[compactConversationKey]?.messages ?? (m.messages as AipgUiMessage[])
+      const systemPromptToUse = appendAutoCompactSystemInstruction(
+        `${baseSystemPrompt}${mcpInstructions}`,
+        uiMessageSource as AipgUiMessage[],
+      )
       // Self-heal orphaned tool calls (interrupted/stopped turns, HMR) before
       // converting: an assistant tool-call with no matching result would make
       // convertToModelMessages/streamText throw "Tool result is missing …" and
       // brick the thread. See toolMessageSanitize.ts.
-      let messages = await convertToModelMessages(completeOrphanedToolParts(m.messages))
+      let messages = await convertToModelMessages(
+        completeOrphanedToolParts(uiMessageSource as AipgUiMessage[]),
+      )
       // [HA-DIAG] Temporary: gate perf logging to Home Agent turns. Declared here
       // (not at the streamText callbacks) so the earlier image-trim block can log.
       const haDiag = textInference.activePreset?.name === HOME_AGENT_CHAT_PRESET_NAME
@@ -641,7 +928,7 @@ export const useOpenAiCompatibleChat = defineStore(
         messages,
         abortSignal: options.signal,
         system: systemPromptToUse,
-        maxOutputTokens: textInference.maxTokens,
+        maxOutputTokens: resolveMaxOutputTokens(),
         temperature: textInference.temperature,
         includeRawChunks: true,
         // Surfaced to tool execute() so tools (e.g. configureHomeAgent) know
@@ -1026,32 +1313,64 @@ export const useOpenAiCompatibleChat = defineStore(
 
       // 4. Get chat instance and send message
       const chat = getOrCreateChat(targetKey)
-
-      if (!sideChannel) {
-        messageInput.value = question
-      }
+      const systemPromptForCompact = await resolveSystemPromptForInference(ragContext.systemPrompt)
       const effectiveFiles =
         options?.files && options.files.length > 0
           ? options.files
           : !sideChannel && fileInput.value.length > 0
             ? fileInput.value
             : undefined
+      const pendingTokens = estimatePendingUserTokens(question, effectiveFiles)
+      await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
+        preserveFromIndex: chat.messages.length,
+        pendingTokens,
+      })
+
+      if (!sideChannel) {
+        messageInput.value = question
+      }
+      const sendPayload = {
+        text: question,
+        files: effectiveFiles,
+        metadata: {
+          model: textInference.activeModel,
+          timestamp: Date.now(),
+        },
+      }
       try {
-        await chat.sendMessage({
-          text: question,
-          files: effectiveFiles,
-          metadata: {
-            model: textInference.activeModel,
-            timestamp: Date.now(),
-          },
-        })
+        await chat.sendMessage(sendPayload)
       } finally {
         temporarySystemPrompts[targetKey] = null
       }
 
+      let hadError = !!chat.error && !manuallyStopped.value
+      if (
+        hadError &&
+        textInference.autoContextCompactEnabled &&
+        chat.error &&
+        isContextOverflowErrorMessage(extractMessage(chat.error))
+      ) {
+        try {
+          await retryAfterContextOverflow(targetKey, systemPromptForCompact, sendPayload)
+          hadError = !!chat.error && !manuallyStopped.value
+        } catch (retryError) {
+          throw errors.report(retryError, {
+            category: 'inference',
+            code: 'inference/context-compact-retry-failed',
+            userMessage: `Could not recover from context overflow: ${extractMessage(retryError)}`,
+            surface: sideChannel ? 'silent' : 'toast',
+            context: { conversationKey: targetKey },
+          })
+        }
+      }
+
+      if (!hadError) {
+        await retryReasoningOnlyTurnIfNeeded(targetKey)
+      }
+
       // The Chat onError hook records stream failures. A failed turn should keep
       // the user's prompt/attachments for retry instead of clearing them.
-      const hadError = !!chat.error && !manuallyStopped.value
+      hadError = !!chat.error && !manuallyStopped.value
 
       const outgoingMessages = chat.messages
 
@@ -1118,6 +1437,12 @@ export const useOpenAiCompatibleChat = defineStore(
 
       const ragContext = await textInference.prepareRagContext(question)
       temporarySystemPrompts[targetKey] = ragContext.systemPrompt
+
+      const preserveFromIndex = targetIdx > 0 ? targetIdx - 1 : 0
+      const systemPromptForCompact = await resolveSystemPromptForInference(ragContext.systemPrompt)
+      await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
+        preserveFromIndex,
+      })
 
       try {
         await chat.regenerate({ messageId })

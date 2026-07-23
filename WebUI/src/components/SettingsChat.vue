@@ -100,6 +100,20 @@
           />
         </div>
         <div class="grid grid-cols-[120px_1fr] items-center gap-4">
+          <Label class="whitespace-nowrap">{{ languages.ANSWER_AUTO_CONTEXT_COMPACT }}</Label>
+          <Checkbox
+            id="auto-context-compact"
+            :model-value="textInference.autoContextCompactEnabled"
+            @click="
+              () =>
+                (textInference.autoContextCompactEnabled = !textInference.autoContextCompactEnabled)
+            "
+          />
+        </div>
+        <p class="text-xs text-muted-foreground ml-[120px] pl-4">
+          {{ languages.ANSWER_AUTO_CONTEXT_COMPACT_HINT }}
+        </p>
+        <div class="grid grid-cols-[120px_1fr] items-center gap-4">
           <Label class="whitespace-nowrap">{{ languages.ANSWER_METRICS }}</Label>
           <Checkbox
             id="metrics"

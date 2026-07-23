@@ -35,6 +35,8 @@ export type ConversationThreadMeta = {
   presetName: string
   variant?: string | null
   kind?: ThreadKind
+  /** Set after auto context compact so we do not re-summarize every turn. */
+  contextCompactedForContextSize?: number
 }
 
 export type CreateConversationOptions = {

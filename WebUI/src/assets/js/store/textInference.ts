@@ -354,6 +354,8 @@ export const useTextInference = defineStore(
 
     const maxTokens = ref<number>(1024)
     const contextSize = ref<number>(8192)
+    /** When enabled, long threads are summarized before inference to avoid context overflows. */
+    const autoContextCompactEnabled = ref<boolean>(true)
     const temperature = ref<number>(0.7)
 
     // Get max context size from current model
@@ -1256,6 +1258,9 @@ export const useTextInference = defineStore(
         contextSize.value = preset.contextSize
       }
 
+      autoContextCompactEnabled.value =
+        (savedSettings.autoContextCompactEnabled as boolean | undefined) ?? true
+
       // Load temperature
       if (savedSettings.temperature !== undefined) {
         temperature.value = savedSettings.temperature as number
@@ -1296,7 +1301,7 @@ export const useTextInference = defineStore(
 
       // Load thinking-enabled (defaults to true when unsaved; only takes effect for
       // models that support the toggle via modelSupportsThinkingToggle).
-      thinkingEnabled.value = (savedSettings.thinkingEnabled as boolean | undefined) ?? true
+      thinkingEnabled.value = (savedSettings.thinkingEnabled as boolean | undefined) ?? false
 
       // Defer clearing the flag so the persistence watcher (default flush:
       // 'pre') sees `isLoadingSettings === true` when it runs for the writes
@@ -1424,6 +1429,7 @@ export const useTextInference = defineStore(
         selectedEmbeddingModels,
         maxTokens,
         contextSize,
+        autoContextCompactEnabled,
         temperature,
         systemPrompt,
         metricsEnabled,
@@ -1448,6 +1454,7 @@ export const useTextInference = defineStore(
           selectedDeviceId: getCurrentDeviceId(),
           maxTokens: maxTokens.value,
           contextSize: contextSize.value,
+          autoContextCompactEnabled: autoContextCompactEnabled.value,
           temperature: temperature.value,
           systemPrompt: systemPrompt.value,
           metricsEnabled: metricsEnabled.value,
@@ -1579,6 +1586,7 @@ export const useTextInference = defineStore(
       screenshotWindow,
       maxTokens,
       contextSize,
+      autoContextCompactEnabled,
       maxContextSizeFromModel,
       temperature,
       fontSizeClass,
