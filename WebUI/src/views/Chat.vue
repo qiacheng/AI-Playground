@@ -137,7 +137,15 @@
               >
                 <!-- Reasoning part -->
                 <ChatReasoningDisplay
-                  v-if="part.type === 'reasoning'"
+                  v-if="
+                    part.type === 'reasoning' &&
+                    reasoningPartShouldDisplay(
+                      part as ReasoningUiPart,
+                      message,
+                      partIndex,
+                      i === activeConversation.length - 1,
+                    )
+                  "
                   :text="(part as { text?: string }).text"
                   :startedAt="
                     (part as { providerMetadata?: { aipg?: { reasoningStarted?: number } } })
@@ -453,16 +461,7 @@ const hasPendingConfirmation = computed(
 
 // Whether a message already shows something (streamed text, reasoning, or a tool
 // part). Used to suppress action buttons / show the activity indicator inside an
-// otherwise-empty in-progress assistant bubble.
-function messageHasVisibleContent(message: { parts?: { type: string; text?: string }[] }): boolean {
-  return (
-    message.parts?.some((part) => {
-      if (part.type === 'text') return stripAipgMediaImages(part.text ?? '').length > 0
-      if (part.type === 'reasoning') return true
-      return isToolOrDynamicToolUIPart(part as Parameters<typeof isToolOrDynamicToolUIPart>[0])
-    }) ?? false
-  )
-}
+// otherwise-empty in-progress assistant bubble. (Implementation below reasoning helpers.)
 
 // True when the last message is an assistant turn (its bubble already hosts the
 // activity indicator), so the standalone bottom indicator is only used earlier
@@ -748,6 +747,39 @@ function isWebBrowsePart(part: ToolUIPart<AipgTools> | DynamicToolUIPart): boole
 
 type ChatMessage = NonNullable<typeof activeConversation.value>[number]
 
+type ReasoningUiPart = {
+  type: string
+  text?: string
+  providerMetadata?: { aipg?: { reasoningStarted?: number; reasoningFinished?: number } }
+}
+
+/** Qwen-style thinking often emits empty sub-second reasoning parts before each tool step. */
+function reasoningPartShouldDisplay(
+  part: ReasoningUiPart,
+  message: ChatMessage,
+  partIndex: number,
+  isLastMessage: boolean,
+): boolean {
+  const text = part.text?.trim() ?? ''
+  if (text.length > 0) return true
+
+  const started = part.providerMetadata?.aipg?.reasoningStarted
+  const finished = part.providerMetadata?.aipg?.reasoningFinished
+  const durationMs =
+    started != null && finished != null
+      ? finished - started
+      : started != null
+        ? Date.now() - started
+        : 0
+  if (durationMs >= 1000) return true
+
+  return (
+    isLastMessage &&
+    openAiCompatibleChat.reasoningInProgress &&
+    isReasoningStreaming(message, partIndex, isLastMessage)
+  )
+}
+
 function webBrowsePartsOf(message: ChatMessage) {
   return (message.parts ?? []).filter((part) =>
     isWebBrowsePart(part as ToolUIPart<AipgTools> | DynamicToolUIPart),
@@ -768,6 +800,20 @@ function isReasoningStreaming(
   if (!isLastMessage || !openAiCompatibleChat.reasoningInProgress) return false
   const parts = message.parts ?? []
   return !parts.slice(partIndex + 1).some((part) => part.type === 'reasoning')
+}
+
+function messageHasVisibleContent(message: ChatMessage): boolean {
+  const isLast =
+    activeConversation.value?.[activeConversation.value.length - 1]?.id === message.id
+  return (
+    message.parts?.some((part, partIndex) => {
+      if (part.type === 'text') return stripAipgMediaImages(part.text ?? '').length > 0
+      if (part.type === 'reasoning') {
+        return reasoningPartShouldDisplay(part as ReasoningUiPart, message, partIndex, isLast)
+      }
+      return isToolOrDynamicToolUIPart(part as Parameters<typeof isToolOrDynamicToolUIPart>[0])
+    }) ?? false
+  )
 }
 
 // Renders the aggregated component only at the position of the first browse part

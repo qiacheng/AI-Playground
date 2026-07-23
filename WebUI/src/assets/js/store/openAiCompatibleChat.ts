@@ -35,6 +35,7 @@ import {
   buildCompactedMessageList,
   buildContextSummaryPrompt,
   clampSummaryToHistoryBudget,
+  clampTranscriptForSummaryGeneration,
   compactedHistoryFitsBudget,
   estimatePendingUserTokens,
   flattenUiMessagesForSummary,
@@ -53,6 +54,25 @@ import {
   truncateToolOutputsInMessages,
 } from '@/assets/js/chatContextCompact'
 import * as toast from '@/assets/js/toast.ts'
+
+const INFERENCE_BACKEND_HTTP_RECOVER = new Set([500, 502, 503, 504])
+/** Revive + refetch after crash/gateway errors (initial try + this many recoveries). */
+const INFERENCE_FETCH_MAX_REVIVES = 2
+
+function inferenceFetchBackoffMs(reviveIndex: number): number {
+  return Math.min(2500 * 2 ** reviveIndex, 10_000)
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** SDK retries after our fetch revives the backend; keep delays long enough for reload. */
+const INFERENCE_LLM_RETRY = {
+  maxRetries: 1,
+  initialDelayInMs: 5000,
+  backoffFactor: 2,
+} as const
 
 // Web tools that share browseWeb's single "Browse the web" enablement toggle:
 // they all act on the same background browser browseWeb drives.
@@ -265,20 +285,34 @@ export const useOpenAiCompatibleChat = defineStore(
             return globalThis.fetch(requestUrl.toString(), init)
           }
 
-          try {
-            return await doFetch()
-          } catch (error) {
-            // A thrown fetch error (vs. an HTTP error status) means the request
-            // never reached a live server — typically the llama-server process
-            // crashed or wedged (connection refused / timeout). Don't retry a
-            // user-initiated abort. Otherwise relaunch the backend once (which
-            // re-probes health and relaunches a dead/hung server) and retry
-            // against the refreshed port.
-            if (init?.signal?.aborted) throw error
-            console.warn('Inference request failed; relaunching backend and retrying once:', error)
-            await textInference.ensureBackendReadiness()
-            return await doFetch()
+          for (let revive = 0; revive <= INFERENCE_FETCH_MAX_REVIVES; revive++) {
+            if (init?.signal?.aborted) {
+              throw new DOMException('The operation was aborted.', 'AbortError')
+            }
+            try {
+              const response = await doFetch()
+              if (
+                INFERENCE_BACKEND_HTTP_RECOVER.has(response.status) &&
+                revive < INFERENCE_FETCH_MAX_REVIVES
+              ) {
+                console.warn(
+                  `Inference HTTP ${response.status}; reviving backend (${revive + 1}/${INFERENCE_FETCH_MAX_REVIVES})…`,
+                )
+                await textInference.ensureBackendReadiness()
+                await sleepMs(inferenceFetchBackoffMs(revive))
+                continue
+              }
+              return response
+            } catch (error) {
+              if (init?.signal?.aborted) throw error
+              if (revive >= INFERENCE_FETCH_MAX_REVIVES) throw error
+              console.warn('Inference request failed; reviving backend and retrying:', error)
+              await textInference.ensureBackendReadiness()
+              await sleepMs(inferenceFetchBackoffMs(revive))
+            }
           }
+
+          throw new Error('Inference fetch failed after backend recovery attempts')
         },
       }).chatModel(textInference.activeModel?.split('/').join('---') ?? ''),
     )
@@ -504,6 +538,7 @@ export const useOpenAiCompatibleChat = defineStore(
           prompt: buildContextSummaryPrompt(transcript, concise),
           maxOutputTokens: concise ? 256 : 512,
           temperature: 0.2,
+          ...INFERENCE_LLM_RETRY,
         })
         return text.trim()
       }
@@ -528,16 +563,22 @@ export const useOpenAiCompatibleChat = defineStore(
       let summary = ''
       suppressThinkingInRequest.value = true
       try {
-        const transcript = flattenUiMessagesForSummary(split.prefix)
+        let transcript = flattenUiMessagesForSummary(
+          truncateToolOutputsInMessages(split.prefix, 400),
+        )
         if (!transcript.trim()) return false
 
+        transcript = clampTranscriptForSummaryGeneration(transcript, contextSize, 512)
         summary = await summarizeWithActivity(transcript, false)
       } catch (error) {
+        // Compaction is best-effort; the main chat turn may still fit via trim. Do not
+        // alarm the user with a toast when summarization alone fails.
         errors.report(error, {
           category: 'inference',
           code: 'inference/context-compact-failed',
           userMessage: `Could not compact conversation context: ${extractMessage(error)}`,
-          surface: conversationKey === conversations.activeKey ? 'toast' : 'silent',
+          surface: 'silent',
+          severity: 'warn',
           context: { conversationKey },
         })
         return false
@@ -1177,6 +1218,7 @@ export const useOpenAiCompatibleChat = defineStore(
         maxOutputTokens: inferenceMaxOutput,
         temperature: textInference.temperature,
         includeRawChunks: true,
+        ...INFERENCE_LLM_RETRY,
         prepareStep: ({ messages: stepMessages, stepNumber }) => {
           if (stepNumber === 0 && !hasTools) return undefined
           const trimmed = trimModelMessagesToContextBudget(
@@ -1510,6 +1552,7 @@ export const useOpenAiCompatibleChat = defineStore(
             'Output only the summary, no quotes, no punctuation.\n\n' +
             messagesText,
           maxOutputTokens: 24,
+          ...INFERENCE_LLM_RETRY,
         })
         return text.trim().split(/\s+/).slice(0, 5).join(' ')
       } catch (error) {

@@ -137,6 +137,22 @@ export function buildContextSummaryPrompt(transcript: string, concise = false): 
   return intro + transcript
 }
 
+/** Keep summary `generateText` prompts inside the loaded context window (llama n_ctx). */
+export function clampTranscriptForSummaryGeneration(
+  transcript: string,
+  contextSize: number,
+  summaryMaxOutputTokens = 512,
+): string {
+  const maxPrompt = maxPromptTokensForContext(contextSize, summaryMaxOutputTokens)
+  const templateTokens = estimateTextTokens(buildContextSummaryPrompt('', false)) + 64
+  const transcriptTokenBudget = Math.max(maxPrompt - templateTokens, 256)
+  const maxChars = Math.max(
+    Math.floor((transcriptTokenBudget / TOKEN_ESTIMATE_SAFETY) * 4),
+    512,
+  )
+  return clipTextForContext(transcript, maxChars)
+}
+
 const COMPACT_SUMMARY_PREFIX = `${COMPACT_SUMMARY_MARKER}\n\n`
 
 /** Rough token estimate (~4 chars per token) for budgeting before the request. */

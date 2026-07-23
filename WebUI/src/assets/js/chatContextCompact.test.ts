@@ -20,6 +20,7 @@ import {
   TARGET_HISTORY_SHARE,
   trimModelMessagesToContextBudget,
   maxAllowedPromptTokens,
+  clampTranscriptForSummaryGeneration,
   resolveUiMessagesForInference,
 } from './chatContextCompact'
 
@@ -169,6 +170,15 @@ describe('projectedPromptTokens', () => {
     const msgs = [uiMsg('user', 'a'.repeat(28000), 'u')]
     const projected = projectedPromptTokens(msgs, '', 0)
     expect(projected).toBeGreaterThan(maxPromptTokensForContext(8192, 1024))
+  })
+})
+
+describe('clampTranscriptForSummaryGeneration', () => {
+  it('shortens transcripts so summary generation fits the context window', () => {
+    const huge = 'word '.repeat(50_000)
+    const clamped = clampTranscriptForSummaryGeneration(huge, 8192, 512)
+    expect(clamped.length).toBeLessThan(huge.length)
+    expect(clamped).toContain('[truncated for context]')
   })
 })
 
