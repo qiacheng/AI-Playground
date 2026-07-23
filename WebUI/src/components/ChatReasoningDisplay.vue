@@ -6,10 +6,8 @@ const props = defineProps<{
   startedAt?: number
   finishedAt?: number
   streaming?: boolean
-  // Wall-clock start of the live reasoning block, supplied by the store while
-  // `streaming` is true. The part's own `startedAt`/`finishedAt` metadata is
-  // only attached once the block finishes, so the increasing timer relies on
-  // this instead.
+  /** Tool-loop turns: collapsed header only; full text on expand (never auto-stream open). */
+  toolLoopMode?: boolean
   liveStartedAt?: number
   onCopy?: (text: string) => void
 }>()
@@ -45,6 +43,10 @@ const elapsedSeconds = computed(() => {
 })
 
 const statusText = computed(() => {
+  if (props.toolLoopMode) {
+    if (props.streaming) return 'Thinking…'
+    return 'Thinking (expand to view)'
+  }
   if (!props.streaming && props.finishedAt && props.startedAt) {
     return `Done Reasoning after ${elapsedSeconds.value} seconds`
   }

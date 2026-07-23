@@ -19,6 +19,16 @@ const COMPACT_SUMMARY_MARKER = '[Earlier conversation — auto-compacted]'
 /** Extra prompt budget reserved before send when tool calling may add several steps. */
 export const TOOL_TURN_CONTEXT_RESERVE_TOKENS = 2048
 
+/** Default max model↔tool round-trips per chat send (AI SDK `stopWhen: stepCountIs(...)`). */
+export const DEFAULT_TOOL_LOOP_MAX_STEPS = 20
+export const MIN_TOOL_LOOP_MAX_STEPS = 5
+export const MAX_TOOL_LOOP_MAX_STEPS = 64
+
+export function clampToolLoopMaxSteps(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_TOOL_LOOP_MAX_STEPS
+  return Math.min(MAX_TOOL_LOOP_MAX_STEPS, Math.max(MIN_TOOL_LOOP_MAX_STEPS, Math.round(value)))
+}
+
 /** Cap persisted tool output size so compaction and retries can recover from large results. */
 export const MAX_PERSISTED_TOOL_OUTPUT_CHARS = 1500
 
@@ -575,17 +585,26 @@ export function trimModelMessagesToContextBudget(
   }
   target = Math.max(target, 256)
 
+  const measuredAtContextLimit =
+    !!options?.measuredPromptTokens &&
+    shouldCompactFromMeasuredUsage(options.measuredPromptTokens, contextSize)
+
+  const finishTrim = (candidate: LooseModelMessage[]) => {
+    if (!measuredAtContextLimit) return candidate
+    return emergencyTrimModelMessagesForMeasuredOverflow(candidate, systemPrompt, target)
+  }
+
   const fits = (candidate: LooseModelMessage[]) =>
     estimateLooseMessagesTokens(candidate, systemPrompt) <= target
 
   let globalCap = MAX_PERSISTED_TOOL_OUTPUT_CHARS
   let current = messages.map((m) => truncateLooseModelMessage(m, globalCap))
-  if (fits(current)) return current
+  if (fits(current)) return finishTrim(current)
 
   while (globalCap > 48) {
     globalCap = Math.floor(globalCap / 2)
     current = messages.map((m) => truncateLooseModelMessage(m, globalCap))
-    if (fits(current)) return current
+    if (fits(current)) return finishTrim(current)
   }
 
   let baseCap = 1600
@@ -597,11 +616,92 @@ export function trimModelMessagesToContextBudget(
       return Math.max(Math.floor(baseCap / 2), 64)
     })
     current = messages.map((m, i) => truncateLooseModelMessage(m, caps[i] ?? baseCap))
-    if (fits(current)) return current
+    if (fits(current)) return finishTrim(current)
     baseCap = Math.floor(baseCap * 0.55)
   }
 
-  return messages.map((m) => truncateLooseModelMessage(m, 48))
+  current = messages.map((m) => truncateLooseModelMessage(m, 48))
+  if (fits(current)) return finishTrim(current)
+
+  return finishTrim(current)
+}
+
+/** Keep the current user turn and later tool steps; drop older history when the backend is at n_ctx. */
+function sliceModelMessagesFromLastUser(messages: LooseModelMessage[]): LooseModelMessage[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') return messages.slice(i)
+  }
+  return messages.length > 2 ? messages.slice(-2) : messages
+}
+
+/** Drop oldest assistant/tool round-trips after the last user message, keeping the most recent cycles. */
+function keepRecentToolCyclesAfterLastUser(
+  messages: LooseModelMessage[],
+  maxCycles: number,
+): LooseModelMessage[] {
+  let userIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') {
+      userIdx = i
+      break
+    }
+  }
+  if (userIdx < 0) return messages
+
+  const head = messages.slice(0, userIdx + 1)
+  const tail = messages.slice(userIdx + 1)
+  if (tail.length === 0) return messages
+
+  type Cycle = { assistant?: LooseModelMessage; tools: LooseModelMessage[] }
+  const cycles: Cycle[] = []
+  let current: Cycle = { tools: [] }
+
+  for (const msg of tail) {
+    if (msg.role === 'assistant') {
+      if (current.assistant || current.tools.length > 0) cycles.push(current)
+      current = { assistant: msg, tools: [] }
+    } else if (msg.role === 'tool') {
+      current.tools.push(msg)
+    } else {
+      if (current.assistant || current.tools.length > 0) cycles.push(current)
+      current = { tools: [] }
+      head.push(msg)
+    }
+  }
+  if (current.assistant || current.tools.length > 0) cycles.push(current)
+
+  const kept = cycles.slice(-Math.max(maxCycles, 1))
+  const rebuiltTail = kept.flatMap((c) =>
+    c.assistant ? [c.assistant, ...c.tools] : c.tools,
+  )
+  return [...head, ...rebuiltTail]
+}
+
+function emergencyTrimModelMessagesForMeasuredOverflow(
+  messages: LooseModelMessage[],
+  systemPrompt: string,
+  target: number,
+): LooseModelMessage[] {
+  const fits = (candidate: LooseModelMessage[]) =>
+    estimateLooseMessagesTokens(candidate, systemPrompt) <= target
+
+  let current = messages
+  const forgetSteps: Array<(m: LooseModelMessage[]) => LooseModelMessage[]> = [
+    (m) => sliceModelMessagesFromLastUser(m),
+    (m) => keepRecentToolCyclesAfterLastUser(m, 4),
+    (m) => keepRecentToolCyclesAfterLastUser(m, 2),
+    (m) => keepRecentToolCyclesAfterLastUser(m, 1),
+  ]
+
+  for (const step of forgetSteps) {
+    const next = step(current)
+    if (next.length === current.length && step !== forgetSteps[0]) continue
+    current = next
+    current = current.map((m) => truncateLooseModelMessage(m, 48))
+    if (fits(current)) return current
+  }
+
+  return current.map((m) => truncateLooseModelMessage(m, 48))
 }
 
 /**

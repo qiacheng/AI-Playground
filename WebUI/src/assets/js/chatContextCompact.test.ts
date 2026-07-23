@@ -21,6 +21,9 @@ import {
   trimModelMessagesToContextBudget,
   maxAllowedPromptTokens,
   clampTranscriptForSummaryGeneration,
+  clampToolLoopMaxSteps,
+  MAX_TOOL_LOOP_MAX_STEPS,
+  MIN_TOOL_LOOP_MAX_STEPS,
   resolveUiMessagesForInference,
 } from './chatContextCompact'
 
@@ -182,6 +185,14 @@ describe('clampTranscriptForSummaryGeneration', () => {
   })
 })
 
+describe('clampToolLoopMaxSteps', () => {
+  it('clamps to configured bounds', () => {
+    expect(clampToolLoopMaxSteps(3)).toBe(MIN_TOOL_LOOP_MAX_STEPS)
+    expect(clampToolLoopMaxSteps(100)).toBe(MAX_TOOL_LOOP_MAX_STEPS)
+    expect(clampToolLoopMaxSteps(30)).toBe(30)
+  })
+})
+
 describe('trimModelMessagesToContextBudget', () => {
   it('shrinks oversized tool results so the prompt fits under the send budget', () => {
     const huge = 'x'.repeat(120_000)
@@ -213,5 +224,35 @@ describe('trimModelMessagesToContextBudget', () => {
       (system.length / 4 + JSON.stringify(trimmed).length / 4) * 1.35,
     )
     expect(estimate).toBeLessThanOrEqual(budget)
+  })
+
+  it('drops older history when measured prompt tokens hit the context ceiling', () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'old question' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'old answer' }] },
+      { role: 'user', content: [{ type: 'text', text: 'current question' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: '1', toolName: 'mcp__x__call_tool', input: {} }],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: '1',
+            toolName: 'mcp__x__call_tool',
+            output: { type: 'text', value: 'y'.repeat(50_000) },
+          },
+        ],
+      },
+    ]
+    const trimmed = trimModelMessagesToContextBudget(messages, 'system', 8192, 512, {
+      toolStep: true,
+      measuredPromptTokens: 8100,
+    })
+    expect(trimmed.length).toBeLessThan(messages.length)
+    expect(trimmed[0]?.role).toBe('user')
+    expect((trimmed[0]?.content as { text: string }[])[0]?.text).toBe('current question')
   })
 })

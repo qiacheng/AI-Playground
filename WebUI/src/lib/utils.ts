@@ -43,6 +43,19 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Strip internal context-budget marker from text shown in the chat UI. */
+export function stripContextTruncationMarker(text: string): string {
+  return text.replace(/\s*…?\s*\[truncated for context\]\s*$/i, '').trim()
+}
+
+/** Single-line preview for in-turn thinking (tool loops). */
+export function toThinkingOneLine(text: string, maxLen = 140): string {
+  const cleaned = stripContextTruncationMarker(text).replace(/\s+/g, ' ').trim()
+  if (!cleaned) return ''
+  if (cleaned.length <= maxLen) return cleaned
+  return `${cleaned.slice(0, maxLen).trimEnd()}…`
+}
+
 export function mapStatusToColor(componentState: BackendStatus) {
   switch (componentState) {
     case 'running':

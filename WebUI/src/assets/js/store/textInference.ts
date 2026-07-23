@@ -13,6 +13,12 @@ import { useConversations, HOME_AGENT_CHAT_PRESET_NAME } from './conversations'
 import * as toast from '@/assets/js/toast.ts'
 import { useActivities } from './activities'
 import { useI18N } from './i18n'
+import {
+  clampToolLoopMaxSteps,
+  DEFAULT_TOOL_LOOP_MAX_STEPS,
+  MAX_TOOL_LOOP_MAX_STEPS,
+  MIN_TOOL_LOOP_MAX_STEPS,
+} from '@/assets/js/chatContextCompact'
 
 const LlmBackendSchema = z.enum(llmBackendTypes)
 export type LlmBackend = z.infer<typeof LlmBackendSchema>
@@ -356,6 +362,8 @@ export const useTextInference = defineStore(
     const contextSize = ref<number>(8192)
     /** When enabled, long threads are summarized before inference to avoid context overflows. */
     const autoContextCompactEnabled = ref<boolean>(true)
+    /** Max model↔tool round-trips per send when built-in or MCP tools are enabled. */
+    const toolLoopMaxSteps = ref<number>(DEFAULT_TOOL_LOOP_MAX_STEPS)
     const temperature = ref<number>(0.7)
 
     // Get max context size from current model
@@ -1261,6 +1269,10 @@ export const useTextInference = defineStore(
       autoContextCompactEnabled.value =
         (savedSettings.autoContextCompactEnabled as boolean | undefined) ?? true
 
+      toolLoopMaxSteps.value = clampToolLoopMaxSteps(
+        (savedSettings.toolLoopMaxSteps as number | undefined) ?? DEFAULT_TOOL_LOOP_MAX_STEPS,
+      )
+
       // Load temperature
       if (savedSettings.temperature !== undefined) {
         temperature.value = savedSettings.temperature as number
@@ -1430,6 +1442,7 @@ export const useTextInference = defineStore(
         maxTokens,
         contextSize,
         autoContextCompactEnabled,
+        toolLoopMaxSteps,
         temperature,
         systemPrompt,
         metricsEnabled,
@@ -1455,6 +1468,7 @@ export const useTextInference = defineStore(
           maxTokens: maxTokens.value,
           contextSize: contextSize.value,
           autoContextCompactEnabled: autoContextCompactEnabled.value,
+          toolLoopMaxSteps: clampToolLoopMaxSteps(toolLoopMaxSteps.value),
           temperature: temperature.value,
           systemPrompt: systemPrompt.value,
           metricsEnabled: metricsEnabled.value,
@@ -1587,6 +1601,9 @@ export const useTextInference = defineStore(
       maxTokens,
       contextSize,
       autoContextCompactEnabled,
+      toolLoopMaxSteps,
+      toolLoopMaxStepsMin: MIN_TOOL_LOOP_MAX_STEPS,
+      toolLoopMaxStepsMax: MAX_TOOL_LOOP_MAX_STEPS,
       maxContextSizeFromModel,
       temperature,
       fontSizeClass,

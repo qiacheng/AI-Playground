@@ -137,16 +137,8 @@
               >
                 <!-- Reasoning part -->
                 <ChatReasoningDisplay
-                  v-if="
-                    part.type === 'reasoning' &&
-                    reasoningPartShouldDisplay(
-                      part as ReasoningUiPart,
-                      message,
-                      partIndex,
-                      i === activeConversation.length - 1,
-                    )
-                  "
-                  :text="(part as { text?: string }).text"
+                  v-if="part.type === 'reasoning' && reasoningUiShouldShow(message, partIndex, i === activeConversation.length - 1)"
+                  :text="reasoningDisplayText(message, part as ReasoningUiPart)"
                   :startedAt="
                     (part as { providerMetadata?: { aipg?: { reasoningStarted?: number } } })
                       .providerMetadata?.aipg?.reasoningStarted
@@ -158,6 +150,7 @@
                   :streaming="
                     isReasoningStreaming(message, partIndex, i === activeConversation.length - 1)
                   "
+                  :tool-loop-mode="assistantMessageUsesToolLoop(message)"
                   :liveStartedAt="openAiCompatibleChat.reasoningStartedAt"
                   :onCopy="copyText"
                 />
@@ -165,7 +158,10 @@
                 <!-- Text part -->
                 <template v-else-if="part.type === 'text'">
                   <MarkdownRenderer
-                    :content="stripAipgMediaImages((part as any).text ?? '')"
+                    v-if="textPartShouldDisplay(message, partIndex, i === activeConversation.length - 1)"
+                    :content="
+                      stripContextTruncationMarker(stripAipgMediaImages((part as any).text ?? ''))
+                    "
                     :on-copy="copyText"
                   />
                 </template>
@@ -289,7 +285,10 @@
                     />
                   </template>
                   <template v-else-if="isMcpTool(part)">
-                    <ChatMcpToolDisplay :part="part" :state="part.state" />
+                    <ChatMcpToolsDisplay
+                      v-if="isFirstMcpToolPart(message, partIndex)"
+                      :entries="mcpToolEntriesFor(message)"
+                    />
                   </template>
                   <template v-else>
                     <ChatToolDisplay :part="part" :state="part.state" />
@@ -300,6 +299,21 @@
               <!-- In-turn status inside the assistant bubble: thinking / tool /
                    post-image-gen "reloading chat model" etc. Hidden while image
                    generation is processing (ChatWorkflowResult shows that inline). -->
+              <ChatReasoningDisplay
+                v-if="toolLoopThinkingShouldShow(message, i === activeConversation.length - 1)"
+                :text="reasoningDisplayText(message, { type: 'reasoning' })"
+                :streaming="
+                  i === activeConversation.length - 1 && openAiCompatibleChat.reasoningInProgress
+                "
+                :live-started-at="openAiCompatibleChat.reasoningStartedAt"
+                tool-loop-mode
+                :on-copy="copyText"
+              />
+              <MarkdownRenderer
+                v-if="toolLoopFinalAnswerShouldShow(message, i === activeConversation.length - 1)"
+                :content="toolLoopFinalAnswerText(message, i === activeConversation.length - 1)"
+                :on-copy="copyText"
+              />
               <ChatActivityIndicator
                 v-if="
                   i === activeConversation.length - 1 &&
@@ -308,6 +322,17 @@
                 "
                 :conversation-key="conversations.activeKey"
               />
+              <p
+                v-if="
+                  i === activeConversation.length - 1 &&
+                  !openAiCompatibleChat.processing &&
+                  openAiCompatibleChat.error &&
+                  assistantTurnLooksIncomplete(message, i === activeConversation.length - 1)
+                "
+                class="text-sm text-destructive"
+              >
+                {{ openAiCompatibleChat.error }}
+              </p>
 
               <!-- Inline human-in-the-loop confirmation (e.g. Home Agent self-config).
                    Mirrors remote-channel confirmations into the desktop window so
@@ -415,7 +440,7 @@ import { useErrors } from '@/assets/js/store/errors'
 import { createAppError } from '@/assets/js/errors/appError'
 import { useTextToSpeech } from '@/assets/js/store/textToSpeech'
 import ChatWorkflowResult from '@/components/ChatWorkflowResult.vue'
-import ChatMcpToolDisplay from '@/components/ChatMcpToolDisplay.vue'
+import ChatMcpToolsDisplay, { type McpToolEntry } from '@/components/ChatMcpToolsDisplay.vue'
 import ChatToolDisplay from '@/components/ChatToolDisplay.vue'
 import ChatWebBrowseDisplay, { type WebBrowseEntry } from '@/components/ChatWebBrowseDisplay.vue'
 import ChatReasoningDisplay from '@/components/ChatReasoningDisplay.vue'
@@ -430,9 +455,10 @@ import {
   type GenerateState,
 } from '@/assets/js/store/imageGenerationPresets'
 import { useComfyUiPresets } from '@/assets/js/store/comfyUiPresets'
-import { DynamicToolUIPart, isToolOrDynamicToolUIPart, ToolUIPart } from 'ai'
+import { DynamicToolUIPart, getToolOrDynamicToolName, isToolOrDynamicToolUIPart, ToolUIPart } from 'ai'
 import { aipgTools, AipgTools } from '@/assets/js/tools/tools'
 import { UserCircleIcon } from '@heroicons/vue/24/outline'
+import { stripContextTruncationMarker } from '@/lib/utils'
 
 const openAiCompatibleChat = useOpenAiCompatibleChat()
 const textToSpeech = useTextToSpeech()
@@ -580,15 +606,10 @@ async function handlePromptSubmit(prompt: string) {
 }
 
 function handleCancel() {
-  // Fire off stop requests without awaiting to immediately unblock UI
-  if (openAiCompatibleChat.processing) {
-    openAiCompatibleChat.stop()
-  }
-  // Also cancel any ongoing ComfyUI inference from tool calls
+  // Always stop the chat stream — `processing` can flicker false between tool-loop
+  // steps while the turn is still in flight, which previously skipped stop().
+  void openAiCompatibleChat.stop()
   comfyUi.stop()
-
-  // Immediately reset prompt state to unblock UI
-  promptStore.promptSubmitted = false
 }
 
 let lastScrollTop = 0
@@ -747,6 +768,148 @@ function isWebBrowsePart(part: ToolUIPart<AipgTools> | DynamicToolUIPart): boole
 
 type ChatMessage = NonNullable<typeof activeConversation.value>[number]
 
+function isAssistantToolPart(part: unknown): boolean {
+  return isToolOrDynamicToolUIPart(part as Parameters<typeof isToolOrDynamicToolUIPart>[0])
+}
+
+function assistantMessageUsesToolLoop(message: ChatMessage): boolean {
+  return (message.parts ?? []).some((part) => isAssistantToolPart(part))
+}
+
+function firstToolPartIndex(message: ChatMessage): number {
+  const parts = message.parts ?? []
+  return parts.findIndex((part) => isAssistantToolPart(part))
+}
+
+function lastToolPartIndex(message: ChatMessage): number {
+  const parts = message.parts ?? []
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (isAssistantToolPart(parts[i])) return i
+  }
+  return -1
+}
+
+/** Tool-loop turns: only the pre-tool intro streams in the parts list; final reply is rendered below. */
+function textPartShouldDisplay(
+  message: ChatMessage,
+  partIndex: number,
+  _isLastMessage: boolean,
+): boolean {
+  const firstTool = firstToolPartIndex(message)
+  if (firstTool < 0) return true
+  if (assistantMessageUsesToolLoop(message)) {
+    return partIndex < firstTool
+  }
+  if (partIndex < firstTool) return true
+  const lastTool = lastToolPartIndex(message)
+  if (partIndex > lastTool) return true
+  return false
+}
+
+function toolLoopFinalAnswerText(message: ChatMessage, isLastMessage: boolean): string {
+  if (!assistantMessageUsesToolLoop(message) || assistantTurnLooksIncomplete(message, isLastMessage)) {
+    return ''
+  }
+  const lastTool = lastToolPartIndex(message)
+  const chunks = (message.parts ?? [])
+    .map((part, index) => ({ part, index }))
+    .filter(({ part, index }) => part.type === 'text' && index > lastTool)
+    .map(({ part }) =>
+      stripContextTruncationMarker(stripAipgMediaImages((part as { text?: string }).text ?? '')),
+    )
+    .map((t) => t.trim())
+    .filter(Boolean)
+  return chunks.join('\n\n')
+}
+
+function toolLoopFinalAnswerShouldShow(message: ChatMessage, isLastMessage: boolean): boolean {
+  if (!toolLoopFinalAnswerText(message, isLastMessage)) return false
+  if (isLastMessage && openAiCompatibleChat.processing) return false
+  return true
+}
+
+function latestReasoningPlainText(message: ChatMessage): string {
+  const parts = message.parts ?? []
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i]
+    if (part.type === 'reasoning') {
+      return (part as { text?: string }).text?.trim() ?? ''
+    }
+  }
+  return ''
+}
+
+function reasoningDisplayText(message: ChatMessage, part: ReasoningUiPart): string {
+  if (assistantMessageUsesToolLoop(message)) {
+    return stripContextTruncationMarker(latestReasoningPlainText(message))
+  }
+  return stripContextTruncationMarker(part.text ?? '')
+}
+
+function reasoningUiShouldShow(
+  message: ChatMessage,
+  partIndex: number,
+  isLastMessage: boolean,
+): boolean {
+  if (assistantMessageUsesToolLoop(message)) {
+    return false
+  }
+  return reasoningPartShouldDisplay(
+    (message.parts ?? [])[partIndex] as ReasoningUiPart,
+    message,
+    partIndex,
+    isLastMessage,
+  )
+}
+
+function toolLoopThinkingShouldShow(message: ChatMessage, isLastMessage: boolean): boolean {
+  if (!assistantMessageUsesToolLoop(message)) return false
+  if (latestReasoningPlainText(message)) return true
+  return isLastMessage && openAiCompatibleChat.reasoningInProgress
+}
+
+function assistantTurnLooksIncomplete(message: ChatMessage, isLastMessage: boolean): boolean {
+  if (message.role !== 'assistant' || !assistantMessageUsesToolLoop(message)) return false
+
+  const parts = message.parts ?? []
+  const lastTool = lastToolPartIndex(message)
+
+  const toolStillRunning = parts.some((part) => {
+    if (!isAssistantToolPart(part)) return false
+    const state = (part as { state?: string }).state
+    return state === 'input-streaming' || state === 'input-available'
+  })
+  if (toolStillRunning) return true
+
+  if (isLastMessage && openAiCompatibleChat.processing) return true
+  if (isLastMessage && openAiCompatibleChat.error) return true
+
+  const lastPart = parts.at(-1)
+  if (lastPart && isAssistantToolPart(lastPart)) return true
+  if (lastPart?.type === 'reasoning') return true
+
+  const postToolTexts = parts
+    .map((part, index) => ({ part, index }))
+    .filter(({ part, index }) => part.type === 'text' && index > lastTool)
+    .map(({ part }) => stripAipgMediaImages((part as { text?: string }).text ?? '').trim())
+    .filter(Boolean)
+
+  if (postToolTexts.length === 0) return true
+
+  const combined = postToolTexts.join('\n')
+  if (combined.length < 280 && looksLikeToolLoopPlanningText(combined)) {
+    return true
+  }
+
+  return false
+}
+
+function looksLikeToolLoopPlanningText(text: string): boolean {
+  return /^(I need to|Let me |Now I |So I |Now it |Hmm|Wait,|The tool|Maybe I|It seems|I'll try|I should|I will try)/i.test(
+    text.trim(),
+  )
+}
+
 type ReasoningUiPart = {
   type: string
   text?: string
@@ -754,12 +917,22 @@ type ReasoningUiPart = {
 }
 
 /** Qwen-style thinking often emits empty sub-second reasoning parts before each tool step. */
+function partAt(message: ChatMessage, index: number) {
+  return (message.parts ?? [])[index]
+}
+
+/** Per-step thinking before an MCP call is hidden; final reasoning before text stays visible. */
 function reasoningPartShouldDisplay(
   part: ReasoningUiPart,
   message: ChatMessage,
   partIndex: number,
   isLastMessage: boolean,
 ): boolean {
+  const next = partAt(message, partIndex + 1)
+  if (next && isMcpTool(next as ToolUIPart<AipgTools> | DynamicToolUIPart)) {
+    return false
+  }
+
   const text = part.text?.trim() ?? ''
   if (text.length > 0) return true
 
@@ -807,9 +980,18 @@ function messageHasVisibleContent(message: ChatMessage): boolean {
     activeConversation.value?.[activeConversation.value.length - 1]?.id === message.id
   return (
     message.parts?.some((part, partIndex) => {
-      if (part.type === 'text') return stripAipgMediaImages(part.text ?? '').length > 0
+      if (part.type === 'text') {
+        return (
+          textPartShouldDisplay(message, partIndex, isLast) &&
+          stripAipgMediaImages(part.text ?? '').length > 0
+        )
+      }
       if (part.type === 'reasoning') {
+        if (assistantMessageUsesToolLoop(message)) return false
         return reasoningPartShouldDisplay(part as ReasoningUiPart, message, partIndex, isLast)
+      }
+      if (isMcpTool(part as ToolUIPart<AipgTools> | DynamicToolUIPart)) {
+        return isFirstMcpToolPart(message, partIndex)
       }
       return isToolOrDynamicToolUIPart(part as Parameters<typeof isToolOrDynamicToolUIPart>[0])
     }) ?? false
@@ -818,6 +1000,40 @@ function messageHasVisibleContent(message: ChatMessage): boolean {
 
 // Renders the aggregated component only at the position of the first browse part
 // so it appears once (in order) rather than per tool call.
+function mcpToolPartsOf(message: ChatMessage) {
+  return (message.parts ?? []).filter((part) =>
+    isMcpTool(part as ToolUIPart<AipgTools> | DynamicToolUIPart),
+  ) as DynamicToolUIPart[]
+}
+
+function mcpToolDisplayName(part: DynamicToolUIPart): string {
+  const rawName = getToolOrDynamicToolName(part)
+  if (rawName.startsWith('mcp__')) {
+    const segments = rawName.split('__')
+    const serverId = segments.length >= 3 ? segments[1] : 'unknown'
+    const toolName = segments.length >= 3 ? segments.slice(2).join('__') : rawName
+    return `${serverId} MCP - ${toolName}`
+  }
+  return rawName
+}
+
+function isFirstMcpToolPart(message: ChatMessage, partIndex: number): boolean {
+  const parts = message.parts ?? []
+  const firstIndex = parts.findIndex((part) =>
+    isMcpTool(part as ToolUIPart<AipgTools> | DynamicToolUIPart),
+  )
+  return firstIndex === partIndex
+}
+
+function mcpToolEntriesFor(message: ChatMessage): McpToolEntry[] {
+  return mcpToolPartsOf(message).map((part) => ({
+    toolCallId: part.toolCallId,
+    part,
+    state: part.state,
+    displayName: mcpToolDisplayName(part),
+  }))
+}
+
 function isFirstWebBrowsePart(message: ChatMessage, partIndex: number): boolean {
   const parts = message.parts ?? []
   const firstIndex = parts.findIndex((part) =>

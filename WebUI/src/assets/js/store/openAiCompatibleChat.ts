@@ -49,11 +49,17 @@ import {
   rollbackMessagesBeforeTurnRetry,
   shrinkUiMessagesForSuccessfulTurn,
   splitForTargetHistoryShare,
+  shouldCompactFromMeasuredUsage,
   TOOL_TURN_CONTEXT_RESERVE_TOKENS,
   trimModelMessagesToContextBudget,
   truncateToolOutputsInMessages,
+  clampToolLoopMaxSteps,
+  DEFAULT_TOOL_LOOP_MAX_STEPS,
 } from '@/assets/js/chatContextCompact'
 import * as toast from '@/assets/js/toast.ts'
+
+/** @deprecated Use {@link DEFAULT_TOOL_LOOP_MAX_STEPS} or per-user `toolLoopMaxSteps`. */
+export const TOOL_LOOP_MAX_STEPS = DEFAULT_TOOL_LOOP_MAX_STEPS
 
 const INFERENCE_BACKEND_HTTP_RECOVER = new Set([500, 502, 503, 504])
 /** Revive + refetch after crash/gateway errors (initial try + this many recoveries). */
@@ -134,6 +140,8 @@ export const useOpenAiCompatibleChat = defineStore(
     const confirmations = useConfirmations()
     const i18nState = useI18N().state
     const manuallyStopped = ref(false)
+    /** Whole generate()/sendMessage turn, including gaps while MCP/tools run between stream steps. */
+    const turnInFlightConversations = new Set<string>()
 
     // True while the model is actively emitting reasoning (i.e. the last content
     // chunk was a reasoning delta and no text/tool chunk has followed). Driven
@@ -195,7 +203,9 @@ export const useOpenAiCompatibleChat = defineStore(
     const processing = computed(() => {
       // If manually stopped, immediately return false to unblock UI
       if (manuallyStopped.value) return false
-      const status = chats[conversations.activeKey]?.status
+      const key = conversations.activeKey
+      if (turnInFlightConversations.has(key)) return true
+      const status = chats[key]?.status
       return status === 'submitted' || status === 'streaming'
     })
 
@@ -488,6 +498,7 @@ export const useOpenAiCompatibleChat = defineStore(
       pendingTokens = 0,
       force = false,
       turnPrepActivityId?: string,
+      measuredPromptTokensOverride?: number,
     ): Promise<boolean> {
       if (!textInference.autoContextCompactEnabled) return false
 
@@ -504,7 +515,10 @@ export const useOpenAiCompatibleChat = defineStore(
       const contextSize = effectiveContextSizeForBudget()
       const maxOutputTokens = resolveMaxOutputTokens()
       const allForCheck = [...head, ...tail]
-      const measured = getLastMeasuredPromptTokens(chat.messages)
+      const measured =
+        measuredPromptTokensOverride && measuredPromptTokensOverride > 0
+          ? measuredPromptTokensOverride
+          : getLastMeasuredPromptTokens(chat.messages)
       const threadMeta = conversations.getThreadMeta(conversationKey)
       const hasStoredInferenceSummary = !!threadMeta?.inferenceContextSummary
       const { uiMessages: budgetMessages, systemPrompt: budgetSystemPrompt } =
@@ -754,6 +768,8 @@ export const useOpenAiCompatibleChat = defineStore(
         force?: boolean
         notifyUser?: boolean
         turnPrepActivityId?: string
+        /** Live step prompt size from the backend (tool-loop steps). */
+        measuredPromptTokens?: number
       },
     ): Promise<void> {
       const chat = chats[conversationKey]
@@ -763,8 +779,11 @@ export const useOpenAiCompatibleChat = defineStore(
       const maxOutputTokens = resolveMaxOutputTokens()
       const pendingTokens = opts.pendingTokens ?? 0
       const hardFitPending = opts.hardFitPendingTokens ?? pendingTokens
-      const threadMeta = conversations.getThreadMeta(conversationKey)
       let didSummarize = false
+      const measuredForChecks =
+        opts.measuredPromptTokens && opts.measuredPromptTokens > 0
+          ? opts.measuredPromptTokens
+          : getLastMeasuredPromptTokens(chat.messages as AipgUiMessage[])
 
       if (textInference.autoContextCompactEnabled) {
         let preserveFromIndex = opts.preserveFromIndex ?? chat.messages.length
@@ -774,7 +793,19 @@ export const useOpenAiCompatibleChat = defineStore(
           const meta = conversations.getThreadMeta(conversationKey)
           const { uiMessages: budgetMessages, systemPrompt: budgetSystemPrompt } =
             inferenceContextCheckInputs(chat.messages as AipgUiMessage[], systemPrompt, meta)
+          const hardFitMeasured =
+            measuredForChecks && measuredForChecks > 0 ? measuredForChecks : undefined
           if (
+            !needsContextCompaction(
+              budgetMessages,
+              budgetSystemPrompt,
+              contextSize,
+              maxOutputTokens,
+              hardFitPending,
+              hardFitMeasured,
+              force,
+              !!meta?.inferenceContextSummary,
+            ) &&
             messagesFitHardContextLimit(
               budgetMessages,
               budgetSystemPrompt,
@@ -793,6 +824,7 @@ export const useOpenAiCompatibleChat = defineStore(
             pendingTokens,
             force,
             opts.turnPrepActivityId,
+            measuredForChecks,
           )
           force = true
 
@@ -1200,13 +1232,16 @@ export const useOpenAiCompatibleChat = defineStore(
       // content. (`haDiag` is declared just after convertToModelMessages above.)
       const diagTurnStart = Date.now()
       let diagStepIdx = 0
+      let toolLoopStepCount = 0
       let lastStepInputTokens = 0
+      const systemPromptForCompact = `${baseSystemPrompt}${mcpInstructions}`
+      const toolLoopStepCap = clampToolLoopMaxSteps(textInference.toolLoopMaxSteps)
       if (haDiag) {
         const toolNames = Object.keys(availableTools)
         console.log(
           `[HA-DIAG] turn start model=${textInference.activeModel} backend=${textInference.backend} ` +
             `tools=${toolNames.length} [${toolNames.join(',')}] ` +
-            `systemPromptChars=${systemPromptToUse.length} inputMsgs=${messages.length} stepCap=20`,
+            `systemPromptChars=${systemPromptToUse.length} inputMsgs=${messages.length} stepCap=${toolLoopStepCap}`,
         )
       }
 
@@ -1219,7 +1254,32 @@ export const useOpenAiCompatibleChat = defineStore(
         temperature: textInference.temperature,
         includeRawChunks: true,
         ...INFERENCE_LLM_RETRY,
-        prepareStep: ({ messages: stepMessages, stepNumber }) => {
+        prepareStep: async ({ messages: stepMessages, stepNumber }) => {
+          if (manuallyStopped.value) {
+            throw new DOMException('The operation was aborted.', 'AbortError')
+          }
+
+          const measured = lastStepInputTokens > 0 ? lastStepInputTokens : undefined
+
+          if (
+            stepNumber > 0 &&
+            textInference.autoContextCompactEnabled &&
+            measured &&
+            shouldCompactFromMeasuredUsage(measured, inferenceContextSize)
+          ) {
+            const chat = chats[compactConversationKey]
+            if (chat) {
+              let userIdx = chat.messages.length - 1
+              while (userIdx > 0 && chat.messages[userIdx].role !== 'user') userIdx--
+              await ensureConversationFitsContext(compactConversationKey, systemPromptForCompact, {
+                preserveFromIndex: userIdx,
+                force: true,
+                measuredPromptTokens: measured,
+                hardFitPendingTokens: TOOL_TURN_CONTEXT_RESERVE_TOKENS,
+              })
+            }
+          }
+
           if (stepNumber === 0 && !hasTools) return undefined
           const trimmed = trimModelMessagesToContextBudget(
             stepMessages as { role: string; content?: unknown }[],
@@ -1229,7 +1289,7 @@ export const useOpenAiCompatibleChat = defineStore(
             {
               toolStep: stepNumber > 0,
               toolLoop: hasTools,
-              measuredPromptTokens: lastStepInputTokens > 0 ? lastStepInputTokens : undefined,
+              measuredPromptTokens: measured,
             },
           )
           if (JSON.stringify(trimmed) === JSON.stringify(stepMessages)) return undefined
@@ -1243,7 +1303,7 @@ export const useOpenAiCompatibleChat = defineStore(
         ...(hasTools
           ? {
               tools: availableTools,
-              stopWhen: stepCountIs(20),
+              stopWhen: stepCountIs(toolLoopStepCap),
             }
           : {}),
         onChunk: (chunk) => {
@@ -1261,7 +1321,20 @@ export const useOpenAiCompatibleChat = defineStore(
                 `promptN=${t?.prompt_n ?? '?'} cacheN=${t?.cache_n ?? '?'} promptMs=${t?.prompt_ms == null ? '?' : Math.round(t.prompt_ms)}`,
             )
           }
-          if (
+          if (hasTools) {
+            if (
+              chunkType === 'tool-call' ||
+              chunkType === 'tool-input-start' ||
+              chunkType === 'reasoning-delta'
+            ) {
+              ensureInferenceActivity()
+            } else if (chunkType === 'text-delta') {
+              clearInferenceActivity()
+            } else if (chunkType === 'tool-result') {
+              sawToolResult = true
+              ensureInferenceActivity()
+            }
+          } else if (
             chunkType === 'text-delta' ||
             chunkType === 'reasoning-delta' ||
             chunkType === 'tool-call' ||
@@ -1364,6 +1437,7 @@ export const useOpenAiCompatibleChat = defineStore(
           }
         },
         onStepFinish: (step) => {
+          toolLoopStepCount++
           if (step.usage?.inputTokens && step.usage.inputTokens > 0) {
             lastStepInputTokens = step.usage.inputTokens
           }
@@ -1398,6 +1472,23 @@ export const useOpenAiCompatibleChat = defineStore(
         onFinish: (result) => {
           finishTime = Date.now()
           reasoningInProgress.value = false
+          if (
+            hasTools &&
+            !manuallyStopped.value &&
+            toolLoopStepCount >= toolLoopStepCap
+          ) {
+            const steps = (result as { steps?: { toolCalls?: unknown[] }[] }).steps
+            const lastStep = steps?.at(-1)
+            if (lastStep?.toolCalls?.length) {
+              const isActiveDesktop =
+                (requestConversationKey ?? conversations.activeKey) === conversations.activeKey
+              if (isActiveDesktop) {
+                toast.show(
+                  i18nState.COM_TOAST_TOOL_STEP_LIMIT.replace('{max}', String(toolLoopStepCap)),
+                )
+              }
+            }
+          }
           if (haDiag) {
             console.log(
               `[HA-DIAG] turn done steps=${diagStepIdx} wallMs=${finishTime - diagTurnStart} ` +
@@ -1645,6 +1736,7 @@ export const useOpenAiCompatibleChat = defineStore(
           timestamp: Date.now(),
         },
       }
+      turnInFlightConversations.add(targetKey)
       try {
         await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
           preserveFromIndex: chat.messages.length,
@@ -1708,14 +1800,27 @@ export const useOpenAiCompatibleChat = defineStore(
           fileInput.value = []
         }
       } finally {
+        turnInFlightConversations.delete(targetKey)
         endTurnPrepActivity(targetKey)
       }
     }
 
     async function stop() {
-      // Set manual stop flag to immediately show as not processing
+      const key = conversations.activeKey
       manuallyStopped.value = true
-      await chats[conversations.activeKey]?.stop()
+      turnInFlightConversations.delete(key)
+      try {
+        await chats[key]?.stop()
+      } finally {
+        endTurnPrepActivity(key)
+        activities.endScope(
+          (a) =>
+            a.scope.kind === 'chat' &&
+            a.scope.conversationKey === key &&
+            (a.category === 'inference' || a.category === 'tools'),
+        )
+        confirmations.cancelForConversation(key, false)
+      }
     }
 
     async function regenerate(messageId: string) {
@@ -1761,6 +1866,7 @@ export const useOpenAiCompatibleChat = defineStore(
       const preserveFromIndex = targetIdx > 0 ? targetIdx - 1 : 0
       const systemPromptForCompact = await resolveSystemPromptForInference(ragContext.systemPrompt)
       const turnPrepId = beginTurnPrepActivity(targetKey)
+      turnInFlightConversations.add(targetKey)
       try {
         await ensureConversationFitsContext(targetKey, systemPromptForCompact, {
           preserveFromIndex,
@@ -1783,6 +1889,7 @@ export const useOpenAiCompatibleChat = defineStore(
 
         conversations.updateConversation(messages.value, targetKey)
       } finally {
+        turnInFlightConversations.delete(targetKey)
         endTurnPrepActivity(targetKey)
       }
     }

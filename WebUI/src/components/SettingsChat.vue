@@ -157,7 +157,37 @@
           <SettingsBuiltinTools />
         </div>
 
-        <!-- MCP Tools toggle -->
+        <div
+          v-if="showTools && textInference.modelSupportsToolCalling"
+          class="grid grid-cols-[120px_1fr] items-center gap-4"
+        >
+          <div class="flex items-center gap-1 min-w-0">
+            <Label class="leading-snug whitespace-nowrap">{{
+              languages.ANSWER_TOOL_LOOP_MAX_STEPS
+            }}</Label>
+            <TooltipProvider :delay-duration="200">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <span class="svg-icon i-info w-4 h-4 shrink-0 opacity-50 cursor-help" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-[320px]">
+                  {{ languages.ANSWER_TOOL_LOOP_MAX_STEPS_HINT }}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          <input
+            type="number"
+            v-model.number="toolLoopMaxStepsDraft"
+            :min="textInference.toolLoopMaxStepsMin"
+            :max="textInference.toolLoopMaxStepsMax"
+            step="1"
+            class="rounded-sm text-foreground text-center h-7 w-20 leading-7 p-0 bg-transparent border border-border"
+            @blur="commitToolLoopMaxSteps"
+            @keydown.enter="commitToolLoopMaxSteps"
+          />
+        </div>
+
         <div
           v-if="showTools && textInference.modelSupportsToolCalling"
           class="grid grid-cols-[120px_1fr] items-center gap-4"
@@ -245,7 +275,8 @@ import {
 import DeviceSelector from '@/components/DeviceSelector.vue'
 import ModelSelector from '@/components/ModelSelector.vue'
 import AddLLMDialog from '@/components/AddLLMDialog.vue'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { clampToolLoopMaxSteps } from '@/assets/js/chatContextCompact'
 import { useI18N } from '@/assets/js/store/i18n.ts'
 import Rag from '@/components/Rag.vue'
 import SettingsMcp from '@/components/SettingsMcp.vue'
@@ -265,6 +296,20 @@ const showUploader = ref(false)
 const processing = ref(false)
 const i18nState = useI18N().state
 const textInference = useTextInference()
+const toolLoopMaxStepsDraft = ref(textInference.toolLoopMaxSteps)
+watch(
+  () => textInference.toolLoopMaxSteps,
+  (value) => {
+    toolLoopMaxStepsDraft.value = value
+  },
+)
+
+function commitToolLoopMaxSteps() {
+  const clamped = clampToolLoopMaxSteps(toolLoopMaxStepsDraft.value)
+  textInference.toolLoopMaxSteps = clamped
+  toolLoopMaxStepsDraft.value = clamped
+}
+
 const presetsStore = usePresets()
 const presetSwitching = usePresetSwitching()
 const backendServices = useBackendServices()
