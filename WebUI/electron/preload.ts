@@ -144,6 +144,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLlamaCppDefaultParameters: () => ipcRenderer.invoke('getLlamaCppDefaultParameters'),
   detectPhisonSsd: () => ipcRenderer.invoke('detectPhisonSsd') as Promise<{ detected: boolean }>,
   detectOem: () => ipcRenderer.invoke('detectOem'),
+  isAcerCameraDirectRunning: () => ipcRenderer.invoke('isAcerCameraDirectRunning'),
+  registerCameraCaptureShortcut: () => ipcRenderer.invoke('cameraCapture:registerShortcut'),
+  unregisterCameraCaptureShortcut: () => ipcRenderer.invoke('cameraCapture:unregisterShortcut'),
+  onCameraCaptureShortcut: (callback: () => void) => listen('camera-capture-shortcut', callback),
   onServiceSetUpProgress: (callback: (data: SetupProgress) => void) =>
     ipcRenderer.on('serviceSetUpProgress', (_event, value) => callback(value)),
   onServiceInfoUpdate: (callback: (service: ApiServiceInformation) => void) =>

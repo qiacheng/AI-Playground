@@ -23,6 +23,7 @@ import {
   BrowserWindow,
   desktopCapturer,
   dialog,
+  globalShortcut,
   ipcMain,
   IpcMainEvent,
   IpcMainInvokeEvent,
@@ -128,6 +129,14 @@ import {
   writeArcade,
 } from './gameLibrary.ts'
 import { detectOem } from './subprocesses/oemDetection.ts'
+import {
+  createCachedAcerCameraDirectProbe,
+  queryAcerCameraDirectRunning,
+} from './subprocesses/acerCameraDirect.ts'
+
+const probeAcerCameraDirectRunning = createCachedAcerCameraDirectProbe(() =>
+  queryAcerCameraDirectRunning(process.platform),
+)
 import { packagedResourcesRoot, writableConfigRoot } from './aipgRoot.ts'
 import { loadDemoProfile, type DemoProfile } from './demoProfile.ts'
 import type { ModelPaths } from '@/assets/js/store/models.ts'
@@ -1208,6 +1217,19 @@ function initEventHandle() {
     }
   })
 
+  ipcMain.handle('cameraCapture:registerShortcut', (event) => {
+    globalShortcut.unregister('Alt+Shift+C')
+    return globalShortcut.register('Alt+Shift+C', () => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('camera-capture-shortcut')
+      }
+    })
+  })
+
+  ipcMain.handle('cameraCapture:unregisterShortcut', () => {
+    globalShortcut.unregister('Alt+Shift+C')
+  })
+
   ipcMain.handle('getLocalSettings', () => {
     return LocalSettingsSchema.parse(settings)
   })
@@ -1913,6 +1935,17 @@ function initEventHandle() {
 
   // Which OEM's machine this is, for co-branding (see subprocesses/oemDetection.ts).
   ipcMain.handle('detectOem', () => detectOem(settings.oemVendorOverride))
+
+  ipcMain.handle('isAcerCameraDirectRunning', async () => {
+    const { vendor } = await detectOem(settings.oemVendorOverride)
+    if (vendor !== 'acer') return false
+    try {
+      return await probeAcerCameraDirectRunning()
+    } catch (error) {
+      appLogger.warn(`Unable to inspect Acer camera services: ${error}`, 'electron-backend')
+      return false
+    }
+  })
 
   ipcMain.handle('detectPhisonSsd', async () => {
     if (settings.PhisonSSDdetected) {

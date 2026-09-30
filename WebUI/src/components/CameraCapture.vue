@@ -61,7 +61,13 @@
     <!-- Capture Button -->
     <div class="flex justify-center">
       <Button variant="default" size="sm" :disabled="!cameraStore.isActive" @click="capture">
-        Capture
+        <img
+          v-if="directActive"
+          :src="AcerPhoneWebcamImage"
+          alt=""
+          class="h-5 w-5 object-contain mr-2"
+        />
+        <span>Capture</span>
       </Button>
     </div>
   </div>
@@ -69,13 +75,19 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import DropDownNew from './DropDownNew.vue'
 import { Button } from '@/components/ui/button'
 import { useCameraStore } from '@/assets/js/store/camera'
+import { useAcerPhoneWebcam } from '@/assets/js/store/acerPhoneWebcam'
 import { VideoCameraIcon } from '@heroicons/vue/24/outline'
+import AcerPhoneWebcamImage from '@/assets/image/AcerPhoneWebcam.png'
 
 const cameraStore = useCameraStore()
+const acerPhoneWebcam = useAcerPhoneWebcam()
+const { directActive } = storeToRefs(acerPhoneWebcam)
 const videoElement = ref<HTMLVideoElement | null>(null)
+let removeShortcutListener: (() => void) | null = null
 
 const emit = defineEmits<{
   capture: [file: File]
@@ -91,6 +103,11 @@ watch(
 )
 
 onMounted(async () => {
+  acerPhoneWebcam.acquire()
+  removeShortcutListener = window.electronAPI.onCameraCaptureShortcut(() => {
+    void capture()
+  })
+  await window.electronAPI.registerCameraCaptureShortcut()
   await cameraStore.getDevices()
   if (cameraStore.devices.length > 0) {
     const persistedId = cameraStore.devices.find(
@@ -102,6 +119,10 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  removeShortcutListener?.()
+  removeShortcutListener = null
+  void window.electronAPI.unregisterCameraCaptureShortcut()
+  acerPhoneWebcam.release()
   cameraStore.stopCamera()
 })
 

@@ -409,6 +409,10 @@ type electronAPI = {
   detectPhisonSsd(): Promise<{ detected: boolean }>
   /** Which OEM this machine came from, for partner co-branding. */
   detectOem(): Promise<{ vendor: string; manufacturer: string; overridden: boolean }>
+  isAcerCameraDirectRunning(): Promise<boolean>
+  registerCameraCaptureShortcut(): Promise<boolean>
+  unregisterCameraCaptureShortcut(): Promise<void>
+  onCameraCaptureShortcut(callback: () => void): () => void
   getServices(): Promise<ApiServiceInformation[]>
   getBackendAuthToken(serviceName: string): Promise<string>
   updateServiceSettings(settings: ServiceSettings): Promise<BackendStatus>
