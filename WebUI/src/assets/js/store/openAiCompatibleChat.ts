@@ -17,6 +17,7 @@ import {
   UIMessage,
 } from 'ai'
 import { chatTraceContext, createChatModel } from '@/lib/chatModel'
+import { withResponseLanguageAtStart } from '@/lib/responseLanguage'
 import { useTextInference } from './textInference'
 import { useBackendServices } from './backendServices'
 import { useConversations, HOME_AGENT_CHAT_PRESET_NAME } from './conversations'
@@ -141,7 +142,8 @@ export const useOpenAiCompatibleChat = defineStore(
     const errors = useErrors()
     const activities = useActivities()
     const confirmations = useConfirmations()
-    const i18nState = useI18N().state
+    const i18n = useI18N()
+    const i18nState = i18n.state
     const manuallyStopped = ref(false)
 
     // True while the model is actively emitting reasoning (i.e. the last content
@@ -448,7 +450,11 @@ export const useOpenAiCompatibleChat = defineStore(
         { category: 'tools', label: i18nState.COM_ACTIVITY_PREPARING_TOOLS, scope: activityScope },
         () => resolveMcpInstructions(),
       )
-      const systemPromptToUse = `${baseSystemPrompt}${mcpInstructions}`
+      const systemPromptToUse = withResponseLanguageAtStart(
+        `${baseSystemPrompt}${mcpInstructions}`,
+        i18n.langName,
+        Array.isArray(m.messages) ? m.messages : [],
+      )
       // Self-heal orphaned tool calls (interrupted/stopped turns, HMR) before
       // converting: an assistant tool-call with no matching result would make
       // convertToModelMessages/streamText throw "Tool result is missing …" and
@@ -462,15 +468,27 @@ export const useOpenAiCompatibleChat = defineStore(
 
       // Convert aipg-media image URLs to base64 for the backend (can be slow for
       // large images), so surface it as an activity when there is anything to do.
+      const aipgMediaUrlFromFileData = (data: unknown): string | undefined => {
+        if (typeof data === 'string' && data.startsWith('aipg-media://')) return data
+        if (
+          data &&
+          typeof data === 'object' &&
+          'type' in data &&
+          (data as { type: string }).type === 'url' &&
+          'url' in data &&
+          (data as { url: URL }).url instanceof URL &&
+          (data as { url: URL }).url.protocol === 'aipg-media:'
+        ) {
+          return (data as { url: URL }).url.href
+        }
+        return undefined
+      }
       const hasMediaToConvert = messages.some(
         (msg) =>
           msg.role === 'user' &&
           Array.isArray(msg.content) &&
           msg.content.some(
-            (part) =>
-              part.type === 'file' &&
-              typeof part.data === 'string' &&
-              part.data.startsWith('aipg-media://'),
+            (part) => part.type === 'file' && aipgMediaUrlFromFileData(part.data) !== undefined,
           ),
       )
       const convertMedia = async () =>
@@ -479,13 +497,12 @@ export const useOpenAiCompatibleChat = defineStore(
             if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg
             const content = await Promise.all(
               msg.content.map(async (part) => {
-                if (
-                  part.type === 'file' &&
-                  part.mediaType?.startsWith('image/') &&
-                  typeof part.data === 'string' &&
-                  part.data.startsWith('aipg-media://')
-                ) {
-                  return { ...part, data: await imageUrlToDataUri(part.data) }
+                const aipgUrl =
+                  part.type === 'file' && part.mediaType?.startsWith('image/')
+                    ? aipgMediaUrlFromFileData(part.data)
+                    : undefined
+                if (aipgUrl) {
+                  return { ...part, data: await imageUrlToDataUri(aipgUrl) }
                 }
                 return part
               }),

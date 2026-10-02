@@ -52,6 +52,7 @@ import { randomUUID } from 'node:crypto'
 import { PathsManager } from './pathsManager'
 import { writableConfigFile } from './userConfig.ts'
 import { appLoggerInstance } from './logging/logger.ts'
+import { hintFromError } from './subprocesses/applicationControl.ts'
 import {
   aiplaygroundApiServiceRegistry,
   ApiServiceRegistryImpl,
@@ -2140,6 +2141,7 @@ function initEventHandle() {
           'electron-backend',
         )
         if (!win.isDestroyed()) {
+          const hint = hintFromError(error, message)
           win.webContents.send('serviceSetUpProgress', {
             serviceName,
             step: 'setup failed',
@@ -2148,6 +2150,7 @@ function initEventHandle() {
             errorDetails: {
               stderr: message,
               timestamp: new Date().toISOString(),
+              ...(hint ? { hint } : {}),
             },
           } satisfies SetupProgress)
         }
@@ -2199,7 +2202,7 @@ function initEventHandle() {
         if (homeAgentSvc instanceof HomeAgentBackendService) {
           homeAgentSvc.notifyUpstreamReady(service.baseUrl ?? '')
         }
-        return { success: true }
+        return { success: true, service: service.get_info() }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
         appLogger.error(

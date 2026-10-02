@@ -98,19 +98,27 @@
               <Button
                 id="stt-record-button"
                 class="bg-primary hover:bg-primary/80 text-primary-foreground rounded-lg px-4 py-2"
-                :disabled="audioRecorder.isTranscribing"
+                :disabled="audioRecorder.isTranscribing || speechToText.preparingStt"
                 @click="handleRecordingClick"
               >
                 <i
+                  v-if="!speechToText.preparingStt && !audioRecorder.isTranscribing"
                   class="svg-icon w-5 h-5 mr-2"
                   :class="audioRecorder.isRecording ? 'i-record-active' : 'i-record'"
                 ></i>
+                <span
+                  v-else
+                  class="svg-icon i-loading w-5 h-5 mr-2 animate-spin inline-block"
+                  aria-hidden="true"
+                ></span>
                 {{
-                  audioRecorder.isTranscribing
-                    ? 'Transcribing…'
-                    : audioRecorder.isRecording
-                      ? 'Stop recording'
-                      : 'Record'
+                  speechToText.preparingStt
+                    ? 'Starting speech service…'
+                    : audioRecorder.isTranscribing
+                      ? 'Transcribing…'
+                      : audioRecorder.isRecording
+                        ? 'Stop recording'
+                        : 'Record'
                 }}
               </Button>
               <Label
@@ -306,15 +314,28 @@
               v-if="promptStore.getCurrentMode() === 'chat'"
               @click="handleRecordingClick"
               :disabled="
-                (!sttAvailable && !audioRecorder.isRecording) || audioRecorder.isTranscribing
+                (!sttAvailable && !audioRecorder.isRecording) ||
+                audioRecorder.isTranscribing ||
+                speechToText.preparingStt
               "
-              :title="sttAvailable ? '' : sttUnavailableHint"
+              :title="
+                speechToText.preparingStt
+                  ? 'Starting speech service…'
+                  : sttAvailable
+                    ? ''
+                    : sttUnavailableHint
+              "
             >
               <i
-                v-if="!audioRecorder.isTranscribing"
+                v-if="!audioRecorder.isTranscribing && !speechToText.preparingStt"
                 class="svg-icon w-5 h-5"
                 :class="audioRecorder.isRecording ? 'i-record-active' : 'i-record'"
               ></i>
+              <span
+                v-else
+                class="svg-icon i-loading w-5 h-5 animate-spin inline-block"
+                :aria-label="speechToText.preparingStt ? 'Starting speech service' : 'Transcribing'"
+              ></span>
               <div
                 v-if="audioRecorder.isRecording"
                 class="absolute -top-11 flex gap-1 items-end h-10"
@@ -395,9 +416,11 @@ import type { FileUIPart } from 'ai'
 import {
   mapModeToLabel,
   downscaleImageTo1MP,
+  fitReferenceDataUri,
   imageUrlToDataUri,
   saveImageToMediaInput,
 } from '@/lib/utils.ts'
+import { referencePixelBudget } from '@/lib/referenceImageFit'
 import { useAudioRecorder } from '@/assets/js/store/audioRecorder'
 import { useSpeechToText, type SttReadyResult } from '@/assets/js/store/speechToText'
 import { useTextToSpeech } from '@/assets/js/store/textToSpeech'
@@ -669,15 +692,17 @@ async function handleSttFileUpload(event: Event) {
   })
 }
 
+audioRecorder.registerRecordingCompleteHandler(async (wavBlob) => {
+  if (!isSttPreset.value) return
+  await openAiCompatibleChat.transcribeDirect(wavBlob, {
+    conversationKey: conversations.activeKey,
+    sourceLabel: '🎤 Recording',
+  })
+})
+
 audioRecorder.registerTranscriptionCallback((text) => {
-  // In the STT preset the transcript is the turn's output — render it as a chat
-  // turn instead of dropping it into the prompt box.
-  if (isSttPreset.value) {
-    openAiCompatibleChat.appendTranscriptTurn(text, conversations.activeKey, '🎤 Recording')
-    return
-  }
+  if (isSttPreset.value) return
   prompt.value = text
-  // Mark this as a voice-originated turn so the reply can be auto-spoken.
   textToSpeech.pendingVoiceTurn = true
 })
 
@@ -987,7 +1012,7 @@ async function handleRecordingClick() {
     })
     return
   }
-  await audioRecorder.startRecording()
+  await audioRecorder.startRecording(isSttPreset.value ? { manualStopOnly: true } : undefined)
 }
 
 // Recorder failures are surfaced here rather than at the call site: transcription
@@ -1092,18 +1117,27 @@ async function handleComfyUIImageUpload(imageFiles: File[]) {
 
   try {
     const dataUri = await imageUrlToDataUri(imageUrl)
-    const aipgMediaUrl = await saveImageToMediaInput(dataUri)
+    const preset = presetsStore.activePresetWithVariant
+    const workflow = preset?.type === 'comfy' ? preset.comfyUiApiWorkflow : undefined
+    const fittedUri = await fitReferenceDataUri(
+      dataUri,
+      workflow,
+      referencePixelBudget(preset?.category, imageGeneration.width, imageGeneration.height),
+    )
+    const aipgMediaUrl = await saveImageToMediaInput(fittedUri)
 
     const firstImageInput = imageGeneration.comfyInputs.find((input) => input.type === 'image')
 
     if (firstImageInput) {
+      const historyMode: WorkflowModeType =
+        promptStore.getCurrentMode() === 'video' ? 'video' : 'imageEdit'
       firstImageInput.current.value = aipgMediaUrl
 
       const imageItem: ImageMediaItem = {
         createdAt: Date.now(),
         id: crypto.randomUUID(),
         type: 'image',
-        mode: 'imageEdit',
+        mode: historyMode,
         state: 'done',
         imageUrl: aipgMediaUrl,
         sourceImageUrl: imageUrl,
@@ -1112,10 +1146,10 @@ async function handleComfyUIImageUpload(imageFiles: File[]) {
       }
 
       imageGeneration.generatedImages.push(imageItem)
-      imageGeneration.selectedEditedImageId = imageItem.id
+      if (historyMode === 'video') imageGeneration.selectedVideoId = imageItem.id
+      else imageGeneration.selectedEditedImageId = imageItem.id
 
-      // Switch to imageEdit mode if not already
-      if (promptStore.getCurrentMode() !== 'imageEdit') {
+      if (historyMode === 'imageEdit' && promptStore.getCurrentMode() !== 'imageEdit') {
         promptStore.setCurrentMode('imageEdit')
       }
     }
